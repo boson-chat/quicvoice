@@ -51,7 +51,7 @@ var serveCmd = &cobra.Command{
 		}
 
 		// 1. Services
-		authService, err := buildAuth(cfg)
+		authService, err := buildAuth(ctx, cfg)
 		if err != nil {
 			return err
 		}
@@ -86,15 +86,26 @@ func shutdownMetrics(ctx context.Context, p *metrics.Provider) {
 	}
 }
 
-func buildAuth(cfg config.Config) (auth.AuthServiceImpl, error) {
-	switch {
-	case cfg.AuthConfig.Insecure:
+func buildAuth(ctx context.Context, cfg config.Config) (auth.AuthServiceImpl, error) {
+	a := cfg.AuthConfig
+	if a.Insecure {
 		return auth.NewInsecureAuthService(), nil
-	case cfg.AuthConfig.JWTSecret != "":
-		return auth.NewJWTAuthService(cfg.AuthConfig.JWTSecret), nil
-	default:
-		return nil, errors.New("set JWT_SECRET, or AUTH_INSECURE=true for testing")
 	}
+	comp := &auth.CompositeAuthService{}
+	if a.JWTSecret != "" {
+		comp.HMAC = auth.NewJWTAuthService(a.JWTSecret)
+	}
+	if a.JWKSURL != "" {
+		j, err := auth.NewJWKSAuthService(ctx, a.JWKSURL, a.Issuer, a.Audience)
+		if err != nil {
+			return nil, err
+		}
+		comp.JWKS = j
+	}
+	if comp.HMAC == nil && comp.JWKS == nil {
+		return nil, errors.New("set AUTH_JWKS_URL and/or JWT_SECRET, or AUTH_INSECURE=true for testing")
+	}
+	return comp, nil
 }
 
 func buildTLS(cfg config.Config) (*tls.Config, error) {

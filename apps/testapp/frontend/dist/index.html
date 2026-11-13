@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <link rel="stylesheet" href="/style.css"/>
+  <title>quicvoice test</title>
+  <script type="module" crossorigin src="/assets/index-BLfIrB3C.js"></script>
+</head>
+<body>
+<div class="titlebar" style="--wails-draggable: drag"></div>
+
+<div class="app">
+  <aside class="side">
+    <section class="card">
+      <h2>Server</h2>
+      <label>Address <input id="addr" spellcheck="false" placeholder="voice.boson.chat:7700"/></label>
+      <label>Room <input id="room" spellcheck="false" placeholder="test"/></label>
+      <div id="mint-row" class="hidden">
+        <label>Your name <input id="name" spellcheck="false" placeholder="alice"/></label>
+      </div>
+      <label id="token-row">Token
+        <textarea id="token" rows="2" spellcheck="false" placeholder="paste a room token"></textarea>
+      </label>
+      <label class="check"><input type="checkbox" id="insecure"/> Skip TLS verification (dev server)</label>
+      <button id="connect" class="primary">Connect</button>
+    </section>
+
+    <section class="card">
+      <h2>Devices</h2>
+      <label>Microphone <select id="input"></select></label>
+      <label>Speakers <select id="output"></select></label>
+      <label>Output volume <span class="val" id="master-val">100%</span>
+        <input type="range" id="master" min="0" max="200" value="100"/>
+      </label>
+    </section>
+
+    <section class="card">
+      <h2>Microphone</h2>
+      <div class="meter" title="Mic level"><div class="meter-fill" id="mic-fill"></div><div class="meter-mark" style="left:25%" title="Voice activity threshold"></div></div>
+      <div class="seg" role="radiogroup">
+        <button id="mode-vad" class="on" role="radio">Voice activity</button>
+        <button id="mode-ptt" role="radio">Push to talk</button>
+      </div>
+      <label class="check"><input type="checkbox" id="loopback"/> Hear myself (loopback through Opus)</label>
+    </section>
+  </aside>
+
+  <main class="main">
+    <header class="top">
+      <div>
+        <h1 id="room-title">Not connected</h1>
+        <div class="sub" id="status-line">Join a room to start talking.</div>
+      </div>
+      <div class="pill" id="status-pill"><span class="dot"></span><span id="status-text">offline</span></div>
+    </header>
+
+    <div id="audio-error" class="banner hidden"></div>
+
+    <section class="people" id="people">
+      <div class="empty">No one here yet.</div>
+    </section>
+
+    <footer class="controls">
+      <button id="mute" class="ctl" title="Mute (M)">Mute</button>
+      <button id="deafen" class="ctl" title="Deafen (D)">Deafen</button>
+      <button id="ptt" class="ctl talk hidden" title="Hold Space">Hold to talk</button>
+      <div class="tx" id="tx">●&nbsp;transmitting</div>
+      <div class="spacer"></div>
+      <div class="stats" id="stats"></div>
+    </footer>
+
+    <details class="log">
+      <summary>Log</summary>
+      <ol id="log"></ol>
+    </details>
+  </main>
+</div>
+
+</body>
+</html>

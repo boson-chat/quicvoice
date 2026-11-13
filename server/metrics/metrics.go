@@ -147,12 +147,14 @@ const (
 	DropUnknownKind                         // reserved datagram kind
 	DropSendTooLarge                        // receiver's path MTU too small for the downlink
 	DropSendFailed                          // receiver connection closed / no datagram support
+	DropSendQueueFull                       // receiver's downlink queue full (congested/slow receiver)
 	numDropReasons
 )
 
 var dropNames = [numDropReasons]string{
 	"malformed", "rate_limited", "too_large", "not_in_room", "not_allowed",
 	"target_unsupported", "unknown_kind", "send_too_large", "send_failed",
+	"send_queue_full",
 }
 
 func (r DropReason) String() string { return dropNames[r] }
