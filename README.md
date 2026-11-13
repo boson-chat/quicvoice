@@ -41,7 +41,10 @@ go run ./examples/bot -addr voice.boson.chat:7700 -token "$TOKEN" -room lobby
 | `QUIC_ADDR` | `:7700` | UDP voice listener |
 | `HTTP_ADDR` | `:8080` | `/healthz`, `/version`, `/metrics` |
 | `TLS_CERT_FILE` / `TLS_KEY_FILE` | — | Reloaded when the file changes. Unset = self-signed |
-| `JWT_SECRET` | — | Required unless `AUTH_INSECURE=true` |
+| `AUTH_JWKS_URL` | — | Verify tokens from the boson auth service (EdDSA/ES256/RS256) via its JWKS, e.g. `https://auth.example.com/.well-known/jwks.json`. Keys are cached and refetched on an unknown `kid` |
+| `AUTH_ISSUER` | — | Required `iss` for JWKS tokens (recommended) |
+| `AUTH_AUDIENCE` | `quicvoice` | Required `aud` for JWKS tokens |
+| `JWT_SECRET` | — | HS256 shared secret (legacy / `quicvoiced token`). Can be set together with `AUTH_JWKS_URL`; tokens are routed by `alg`. One of the two is required unless `AUTH_INSECURE=true` |
 | `ROOM_MAX_PARTICIPANTS` | 50 | |
 | `MAX_DATAGRAMS_PER_SEC` | 60 | Per sender |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | — | Set to turn on OTLP metrics push (e.g. `http://otel-collector:4318`; `/v1/metrics` is appended for HTTP). `/metrics` is served either way |
