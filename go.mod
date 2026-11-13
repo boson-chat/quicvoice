@@ -4,6 +4,7 @@ go 1.27.1
 
 require (
 	github.com/MicahParks/keyfunc/v3 v3.9.2
+	github.com/gen2brain/malgo v0.11.27
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/jinzhu/configor v1.2.2
 	github.com/prometheus/client_golang v1.25.0
@@ -22,6 +23,7 @@ require (
 	go.opentelemetry.io/otel/sdk/metric v1.47.0
 	golang.org/x/sync v0.25.0
 	google.golang.org/protobuf v1.36.12
+	gopkg.in/hraban/opus.v2 v2.0.0-20230925203106-0188a62cb302
 )
 
 require (
