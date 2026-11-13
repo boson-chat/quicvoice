@@ -3,7 +3,7 @@ syntax = "proto3";
 
 package quicvoice.v1;
 
-option go_package = "quicvoice/gen/controlpb";
+option go_package = "github.com/boson-chat/quicvoice/gen/controlpb";
 
 message ControlMessage {
   oneof msg {

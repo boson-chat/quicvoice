@@ -1,0 +1,25 @@
+{
+  "branches": ["main"],
+  "tagFormat": "v${version}",
+  "plugins": [
+    [
+      "@semantic-release/commit-analyzer",
+      {
+        "preset": "conventionalcommits",
+        "releaseRules": [
+          { "type": "build", "release": "patch" },
+          { "type": "refactor", "release": "patch" },
+          { "type": "perf", "release": "patch" }
+        ]
+      }
+    ],
+    ["@semantic-release/release-notes-generator", { "preset": "conventionalcommits" }],
+    [
+      "@semantic-release/exec",
+      {
+        "publishCmd": "docker buildx build --platform linux/amd64,linux/arm64 --provenance=false --build-arg VERSION=${nextRelease.version} -t $IMAGE:${nextRelease.version} -t $IMAGE:latest --cache-from type=registry,ref=$IMAGE:buildcache --cache-to type=registry,ref=$IMAGE:buildcache,mode=max --push ."
+      }
+    ],
+    "@semantic-release/github"
+  ]
+}
