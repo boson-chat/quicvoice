@@ -19,6 +19,10 @@ var (
 	ErrInRoom     = errors.New("room: already in a room")
 	ErrEmptyRoom  = errors.New("room: room name required")
 	errNoSessions = errors.New("room: no free session ids")
+
+	// ErrDatagramTooLarge is returned (wrapped) by Peer.SendDatagram when the
+	// datagram doesn't fit the receiver's current path MTU.
+	ErrDatagramTooLarge = errors.New("room: datagram too large for path")
 )
 
 // Peer is the transport side of a participant.
@@ -75,13 +79,40 @@ type RoomServiceImpl interface {
 
 type RoomService struct {
 	maxParticipants int
+	metrics         *metrics.Metrics
 
 	mu    sync.Mutex
 	rooms map[string]*Room
 }
 
-func NewRoomService(maxParticipants int) RoomServiceImpl {
-	return &RoomService{maxParticipants: maxParticipants, rooms: map[string]*Room{}}
+func NewRoomService(maxParticipants int, m *metrics.Metrics) RoomServiceImpl {
+	s := &RoomService{maxParticipants: maxParticipants, metrics: m, rooms: map[string]*Room{}}
+	m.ObserveRooms(s.stats)
+	return s
+}
+
+// stats is read by the metrics collector (every scrape / export interval).
+// It walks the lock-free member snapshots, so it never blocks the audio path.
+func (s *RoomService) stats() metrics.RoomStats {
+	s.mu.Lock()
+	rooms := make([]*Room, 0, len(s.rooms))
+	for _, r := range s.rooms {
+		rooms = append(rooms, r)
+	}
+	s.mu.Unlock()
+
+	st := metrics.RoomStats{Rooms: int64(len(rooms))}
+	for _, r := range rooms {
+		members := r.snapshot.Load()
+		if members == nil {
+			continue
+		}
+		st.MaxRoomSize = max(st.MaxRoomSize, int64(len(*members)))
+		for _, m := range *members {
+			st.AddParticipant(m.Identity.Role)
+		}
+	}
+	return st
 }
 
 func (s *RoomService) Join(_ context.Context, name string, id *auth.Identity, p Peer) (*Member, *controlpb.RoomState, error) {
@@ -97,7 +128,6 @@ func (s *RoomService) Join(_ context.Context, name string, id *auth.Identity, p 
 	if !ok {
 		r = &Room{name: name, members: map[uint16]*Member{}}
 		s.rooms[name] = r
-		metrics.Rooms.Inc()
 	}
 	// Hold s.mu while touching r so Leave can't delete r between lookup and join.
 	r.mu.Lock()
@@ -106,7 +136,6 @@ func (s *RoomService) Join(_ context.Context, name string, id *auth.Identity, p 
 		r.mu.Unlock()
 		if empty {
 			delete(s.rooms, name)
-			metrics.Rooms.Dec()
 		}
 		s.mu.Unlock()
 		return nil, nil, err
@@ -127,7 +156,6 @@ func (s *RoomService) Join(_ context.Context, name string, id *auth.Identity, p 
 	r.rebuildSnapshot()
 	r.mu.Unlock()
 	s.mu.Unlock()
-	metrics.Participants.Inc()
 
 	r.broadcast(sid, &controlpb.ControlMessage{Msg: &controlpb.ControlMessage_ParticipantJoined{
 		ParticipantJoined: &controlpb.ParticipantJoined{Participant: m.participant()},
@@ -156,10 +184,8 @@ func (s *RoomService) Leave(_ context.Context, m *Member, reason string) {
 	r.mu.Unlock()
 	if empty {
 		delete(s.rooms, r.name)
-		metrics.Rooms.Dec()
 	}
 	s.mu.Unlock()
-	metrics.Participants.Dec()
 
 	r.broadcast(m.SessionID, &controlpb.ControlMessage{Msg: &controlpb.ControlMessage_ParticipantLeft{
 		ParticipantLeft: &controlpb.ParticipantLeft{SessionId: uint32(m.SessionID), Reason: reason},
@@ -175,34 +201,53 @@ func (s *RoomService) SetMute(_ context.Context, m *Member, muted, deafened bool
 }
 
 func (s *RoomService) Forward(m *Member, uplink []byte) {
+	mt := s.metrics
+	if len(uplink) < wire.UplinkHeaderLen {
+		mt.Drop(metrics.DropMalformed)
+		return
+	}
 	if !m.Identity.CanSpeak() || m.serverMuted.Load() || m.selfMuted.Load() {
-		metrics.Dropped.WithLabelValues("not_allowed").Inc()
+		mt.Drop(metrics.DropNotAllowed)
 		return
 	}
 	// Voice targets (whisper / sub-groups) come in a later milestone.
-	if len(uplink) > 3 && uplink[3] != 0 {
-		metrics.Dropped.WithLabelValues("target_unsupported").Inc()
+	if uplink[3] != 0 {
+		mt.Drop(metrics.DropTargetUnsupported)
 		return
 	}
 	members := m.room.snapshot.Load()
 	if members == nil {
 		return
 	}
+	mt.FrameForwarded(uplink[2]&0x80 != 0)
+	sent, bytes := 0, 0
 	for _, o := range *members {
 		if o == m || o.deafened.Load() {
 			continue
 		}
 		out, err := wire.ForwardUplink(make([]byte, 0, len(uplink)+2), uplink, m.SessionID, wire.TargetRoom)
 		if err != nil {
-			metrics.Dropped.WithLabelValues("malformed").Inc()
-			return
+			mt.Drop(metrics.DropMalformed)
+			break
 		}
 		if err := o.peer.SendDatagram(out); err != nil {
-			metrics.Dropped.WithLabelValues("send_failed").Inc()
+			mt.Drop(sendDropReason(err))
 			continue
 		}
-		metrics.DatagramsOut.Inc()
+		sent++
+		bytes += len(out)
 	}
+	if sent > 0 {
+		mt.DatagramsSent(metrics.SentDownlink, sent, bytes)
+	}
+}
+
+// sendDropReason classifies a SendDatagram failure. Only called on failure.
+func sendDropReason(err error) metrics.DropReason {
+	if errors.Is(err, ErrDatagramTooLarge) {
+		return metrics.DropSendTooLarge
+	}
+	return metrics.DropSendFailed
 }
 
 // allocID hands out session ids monotonically, skipping 0 and ids in use, so a

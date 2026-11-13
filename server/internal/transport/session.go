@@ -2,7 +2,10 @@ package transport
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
+	"fmt"
+	"io"
 	"sync/atomic"
 	"time"
 
@@ -18,6 +21,10 @@ import (
 // Control messages queued for a client before we treat it as stuck.
 const controlQueue = 256
 
+// Uplink sequence jumps larger than this (1 s of audio) either way are treated
+// as a sender restart, not loss or reordering.
+const maxSeqGap = 50
+
 type session struct {
 	srv  *Server
 	conn *quic.Conn
@@ -32,7 +39,16 @@ func newSession(srv *Server, conn *quic.Conn) *session {
 }
 
 // SendDatagram implements room.Peer.
-func (s *session) SendDatagram(b []byte) error { return s.conn.SendDatagram(b) }
+func (s *session) SendDatagram(b []byte) error {
+	err := s.conn.SendDatagram(b)
+	if err != nil {
+		var tooLarge *quic.DatagramTooLargeError
+		if errors.As(err, &tooLarge) {
+			return fmt.Errorf("%w: %w", room.ErrDatagramTooLarge, err)
+		}
+	}
+	return err
+}
 
 // SendControl implements room.Peer. It never blocks: a client that can't keep
 // up with control traffic is disconnected.
@@ -46,14 +62,17 @@ func (s *session) SendControl(m *controlpb.ControlMessage) error {
 	}
 }
 
-func (s *session) run(ctx context.Context) error {
+func (s *session) run(ctx context.Context) (err error) {
 	log := logger.FromCtx(ctx)
-	defer s.leave(ctx, "disconnected")
+	mt := s.srv.metrics
+	accepted := time.Now()
+	defer s.leave(ctx, metrics.LeaveDisconnected)
 
 	actx, cancel := context.WithDeadline(ctx, s.srv.helloDeadline())
 	stream, err := s.conn.AcceptStream(actx)
 	cancel()
 	if err != nil {
+		mt.Handshake(ctx, metrics.HandshakeNoStream, 0)
 		_ = s.conn.CloseWithError(CodeProtocol, "no control stream")
 		return err
 	}
@@ -62,6 +81,7 @@ func (s *session) run(ctx context.Context) error {
 	rd := wire.NewControlReader(stream)
 	first, err := rd.Read()
 	if err != nil {
+		mt.Handshake(ctx, metrics.HandshakeNoHello, 0)
 		_ = s.conn.CloseWithError(CodeProtocol, "no hello")
 		return err
 	}
@@ -69,15 +89,17 @@ func (s *session) run(ctx context.Context) error {
 
 	hello := first.GetHello()
 	if hello == nil {
+		mt.Handshake(ctx, metrics.HandshakeProtocol, 0)
 		return s.fatal(stream, controlpb.Error_PROTOCOL, "expected Hello")
 	}
+	mt.ControlMessage(ctx, metrics.ControlHello)
 	id, err := s.srv.auth.Verify(ctx, hello.GetToken())
 	if err != nil {
-		code := controlpb.Error_UNAUTHENTICATED
+		code, outcome := controlpb.Error_UNAUTHENTICATED, metrics.HandshakeBadToken
 		if errors.Is(err, auth.ErrTokenExpired) {
-			code = controlpb.Error_TOKEN_EXPIRED
+			code, outcome = controlpb.Error_TOKEN_EXPIRED, metrics.HandshakeExpired
 		}
-		metrics.AuthFailures.WithLabelValues(code.String()).Inc()
+		mt.Handshake(ctx, outcome, 0)
 		return s.fatal(stream, code, err.Error())
 	}
 	s.identity = id
@@ -87,7 +109,13 @@ func (s *session) run(ctx context.Context) error {
 
 	go s.writeLoop(stream)
 	_ = s.SendControl(welcome(s.srv.cfg.RoomConfig.MaxPayload))
+	mt.Handshake(ctx, metrics.HandshakeOK, time.Since(accepted))
+
+	tok := mt.SessionStarted(ctx, hello.GetClientVersion())
+	defer func() { mt.SessionEnded(context.WithoutCancel(ctx), tok, disconnectReason(err)) }()
+
 	go s.datagramLoop(ctx)
+	go s.statsLoop(ctx)
 
 	for {
 		m, err := rd.Read()
@@ -101,56 +129,73 @@ func (s *session) run(ctx context.Context) error {
 }
 
 func (s *session) handleControl(ctx context.Context, m *controlpb.ControlMessage) error {
+	mt := s.srv.metrics
 	switch msg := m.Msg.(type) {
 	case *controlpb.ControlMessage_Join:
+		mt.ControlMessage(ctx, metrics.ControlJoin)
 		if s.member.Load() != nil {
+			mt.Join(ctx, metrics.JoinAlreadyInRoom)
 			s.sendError(controlpb.Error_PROTOCOL, room.ErrInRoom.Error(), false)
 			return nil
 		}
 		mem, state, err := s.srv.rooms.Join(ctx, msg.Join.GetRoom(), s.identity, s)
 		if err != nil {
+			mt.Join(ctx, joinOutcome(err))
 			s.sendError(joinErrorCode(err), err.Error(), false)
 			return nil
 		}
+		mt.Join(ctx, metrics.JoinOK)
+		mt.RoomSize(ctx, len(state.GetParticipants()))
 		s.member.Store(mem)
 		logger.FromCtx(ctx).Info().Str("room", mem.Room()).Uint16("session", mem.SessionID).Msg("joined")
 		_ = s.SendControl(&controlpb.ControlMessage{Msg: &controlpb.ControlMessage_RoomState{RoomState: state}})
 
 	case *controlpb.ControlMessage_Leave:
-		s.leave(ctx, "left")
+		mt.ControlMessage(ctx, metrics.ControlLeave)
+		s.leave(ctx, metrics.LeaveRequested)
 
 	case *controlpb.ControlMessage_SetMute:
+		mt.ControlMessage(ctx, metrics.ControlSetMute)
 		if mem := s.member.Load(); mem != nil {
 			s.srv.rooms.SetMute(ctx, mem, msg.SetMute.GetMuted(), msg.SetMute.GetDeafened())
 		}
 
 	case *controlpb.ControlMessage_Ping:
+		mt.ControlMessage(ctx, metrics.ControlPing)
 		_ = s.SendControl(&controlpb.ControlMessage{Msg: &controlpb.ControlMessage_Pong{
 			Pong: &controlpb.Pong{Id: msg.Ping.GetId()},
 		}})
 
 	case *controlpb.ControlMessage_Hello:
+		mt.ControlMessage(ctx, metrics.ControlHello)
 		s.sendError(controlpb.Error_PROTOCOL, "duplicate Hello", false)
 
 	default:
 		// Known-but-unimplemented and future messages are ignored so newer
 		// clients keep working against this server.
+		mt.ControlMessage(ctx, metrics.ControlUnsupported)
 	}
 	return nil
 }
 
-func (s *session) leave(ctx context.Context, reason string) {
+func (s *session) leave(ctx context.Context, reason metrics.LeaveReason) {
 	if mem := s.member.Swap(nil); mem != nil {
-		s.srv.rooms.Leave(ctx, mem, reason)
-		logger.FromCtx(ctx).Info().Str("room", mem.Room()).Str("reason", reason).Msg("left")
+		s.srv.rooms.Leave(ctx, mem, reason.String())
+		s.srv.metrics.Leave(ctx, reason)
+		logger.FromCtx(ctx).Info().Str("room", mem.Room()).Stringer("reason", reason).Msg("left")
 	}
 }
 
+// datagramLoop is the per-packet hot path: metrics here are atomic adds only.
 func (s *session) datagramLoop(ctx context.Context) {
+	mt := s.srv.metrics
 	maxPerSec := s.srv.cfg.RoomConfig.MaxDatagramsPerSec
 	maxLen := s.srv.cfg.RoomConfig.MaxPayload + wire.UplinkHeaderLen
 	var window time.Time
 	count := 0
+	// Uplink loss estimate. Only this goroutine touches these.
+	var lastSeq uint16
+	haveSeq := false
 
 	for {
 		b, err := s.conn.ReceiveDatagram(ctx)
@@ -159,8 +204,21 @@ func (s *session) datagramLoop(ctx context.Context) {
 		}
 		_, kind, err := wire.Peek(b)
 		if err != nil {
-			metrics.Dropped.WithLabelValues("malformed").Inc()
+			mt.DatagramReceived(metrics.DatagramOther, len(b))
+			mt.Drop(metrics.DropMalformed)
 			continue
+		}
+		switch kind {
+		case wire.KindUplink:
+			mt.DatagramReceived(metrics.DatagramUplink, len(b))
+			// Before rate limiting, so our own drops don't read as network loss.
+			if len(b) >= wire.UplinkHeaderLen {
+				lastSeq, haveSeq = trackSeq(mt, b, lastSeq, haveSeq)
+			}
+		case wire.KindPing:
+			mt.DatagramReceived(metrics.DatagramPing, len(b))
+		default:
+			mt.DatagramReceived(metrics.DatagramOther, len(b))
 		}
 
 		if now := time.Now(); now.Sub(window) >= time.Second {
@@ -168,37 +226,113 @@ func (s *session) datagramLoop(ctx context.Context) {
 		}
 		count++
 		if count > maxPerSec {
-			metrics.Dropped.WithLabelValues("rate_limited").Inc()
+			mt.Drop(metrics.DropRateLimited)
 			continue
 		}
 
 		switch kind {
 		case wire.KindUplink:
-			metrics.DatagramsIn.WithLabelValues("uplink").Inc()
+			if len(b) < wire.UplinkHeaderLen {
+				mt.Drop(metrics.DropMalformed)
+				continue
+			}
 			if len(b) > maxLen {
-				metrics.Dropped.WithLabelValues("too_large").Inc()
+				mt.Drop(metrics.DropTooLarge)
 				continue
 			}
 			mem := s.member.Load()
 			if mem == nil {
-				metrics.Dropped.WithLabelValues("not_in_room").Inc()
+				mt.Drop(metrics.DropNotInRoom)
 				continue
 			}
 			s.srv.rooms.Forward(mem, b)
 
 		case wire.KindPing:
-			metrics.DatagramsIn.WithLabelValues("ping").Inc()
 			p, err := wire.ParsePing(b)
-			if err != nil || p.Reply {
+			if err != nil {
+				mt.Drop(metrics.DropMalformed)
+				continue
+			}
+			if p.Reply {
 				continue
 			}
 			p.Reply = true
-			_ = s.conn.SendDatagram(wire.AppendPing(nil, &p))
+			out := wire.AppendPing(nil, &p)
+			if err := s.SendDatagram(out); err != nil {
+				if errors.Is(err, room.ErrDatagramTooLarge) {
+					mt.Drop(metrics.DropSendTooLarge)
+				} else {
+					mt.Drop(metrics.DropSendFailed)
+				}
+				continue
+			}
+			mt.DatagramsSent(metrics.SentPong, 1, len(out))
 
 		default:
-			metrics.Dropped.WithLabelValues("unknown_kind").Inc()
+			mt.Drop(metrics.DropUnknownKind)
 		}
 	}
+}
+
+// trackSeq counts frames missing between the last uplink seen and this one
+// (b is a full uplink header). It returns the new cursor. Small backwards
+// steps are late/reordered frames and leave the cursor alone; a START flag or
+// a big jump either way restarts tracking without counting loss.
+func trackSeq(mt *metrics.Metrics, b []byte, last uint16, have bool) (uint16, bool) {
+	seq := binary.BigEndian.Uint16(b[4:6])
+	if !have || b[1]&wire.FlagStart != 0 {
+		return seq, true
+	}
+	if back := last - seq; back > 0 && back <= maxSeqGap {
+		return last, true
+	}
+	if gap := seq - last - 1; gap > 0 && gap < maxSeqGap {
+		mt.UplinkLost(int(gap))
+	}
+	return seq, true
+}
+
+// statsLoop samples the connection's QUIC stats every QUIC_STATS_INTERVAL
+// and once more when it closes.
+func (s *session) statsLoop(ctx context.Context) {
+	var tick <-chan time.Time
+	if iv := s.srv.cfg.TelemetryConfig.QUICStatsInterval; iv > 0 {
+		t := time.NewTicker(iv)
+		defer t.Stop()
+		tick = t.C
+	}
+	var prev quic.ConnectionStats
+	for {
+		select {
+		case <-tick:
+			prev = s.sampleStats(ctx, prev)
+		case <-s.conn.Context().Done():
+			s.sampleStats(context.WithoutCancel(ctx), prev)
+			return
+		}
+	}
+}
+
+func (s *session) sampleStats(ctx context.Context, prev quic.ConnectionStats) quic.ConnectionStats {
+	cur := s.conn.ConnectionStats()
+	s.srv.metrics.QUICSample(ctx, metrics.QUICSample{
+		SmoothedRTT:     cur.SmoothedRTT,
+		RTTVariation:    cur.MeanDeviation,
+		PacketsSent:     delta(cur.PacketsSent, prev.PacketsSent),
+		PacketsReceived: delta(cur.PacketsReceived, prev.PacketsReceived),
+		// quic-go's lost counters can go down (a "lost" packet acked late).
+		PacketsLost:   delta(cur.PacketsLost, prev.PacketsLost),
+		BytesSent:     delta(cur.BytesSent, prev.BytesSent),
+		BytesReceived: delta(cur.BytesReceived, prev.BytesReceived),
+	})
+	return cur
+}
+
+func delta(cur, prev uint64) uint64 {
+	if cur < prev {
+		return 0
+	}
+	return cur - prev
 }
 
 func (s *session) writeLoop(stream *quic.Stream) {
@@ -233,6 +367,49 @@ func (s *session) fatal(stream *quic.Stream, code controlpb.Error_Code, msg stri
 	time.Sleep(100 * time.Millisecond)
 	_ = s.conn.CloseWithError(CodeAuth, msg)
 	return errors.New(msg)
+}
+
+// disconnectReason classifies why an authenticated session's run returned.
+func disconnectReason(err error) metrics.DisconnectReason {
+	var appErr *quic.ApplicationError
+	var idle *quic.IdleTimeoutError
+	var trErr *quic.TransportError
+	var strErr *quic.StreamError
+	switch {
+	case errors.As(err, &appErr):
+		if appErr.Remote {
+			return metrics.DisconnectClientClosed
+		}
+		switch appErr.ErrorCode {
+		case CodeSlow:
+			return metrics.DisconnectSlowConsumer
+		case CodeProtocol:
+			return metrics.DisconnectProtocolError
+		case CodeShutdown:
+			return metrics.DisconnectServerShutdown
+		}
+		return metrics.DisconnectError
+	case errors.As(err, &idle):
+		return metrics.DisconnectIdleTimeout
+	case errors.Is(err, io.EOF),
+		errors.As(err, &strErr) && strErr.Remote,
+		errors.As(err, &trErr) && trErr.Remote:
+		return metrics.DisconnectClientClosed
+	case errors.Is(err, context.Canceled), errors.Is(err, quic.ErrServerClosed):
+		return metrics.DisconnectServerShutdown
+	}
+	return metrics.DisconnectError
+}
+
+func joinOutcome(err error) metrics.JoinOutcome {
+	switch {
+	case errors.Is(err, room.ErrRoomFull):
+		return metrics.JoinFull
+	case errors.Is(err, room.ErrForbidden):
+		return metrics.JoinForbidden
+	default:
+		return metrics.JoinBadRequest
+	}
 }
 
 func joinErrorCode(err error) controlpb.Error_Code {

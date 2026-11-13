@@ -13,6 +13,24 @@ type Config struct {
 	HTTPConfig HTTPConfig
 	AuthConfig AuthConfig
 	RoomConfig RoomConfig
+
+	TelemetryConfig TelemetryConfig
+}
+
+// TelemetryConfig controls metrics export. Prometheus on HTTP /metrics is
+// always on; OTLP push is on when an OTLP endpoint is set. The OTLP exporter
+// also reads the other standard OTEL_EXPORTER_OTLP_* vars (headers, timeout,
+// TLS, temporality) and OTEL_METRIC_EXPORT_INTERVAL itself.
+type TelemetryConfig struct {
+	OTLPEndpoint        string `env:"OTEL_EXPORTER_OTLP_ENDPOINT"`
+	OTLPMetricsEndpoint string `env:"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"`
+	// http/protobuf (default) or grpc.
+	OTLPProtocol        string `env:"OTEL_EXPORTER_OTLP_PROTOCOL"`
+	OTLPMetricsProtocol string `env:"OTEL_EXPORTER_OTLP_METRICS_PROTOCOL"`
+	// "none" turns OTLP push off even when an endpoint is set.
+	MetricsExporter string `env:"OTEL_METRICS_EXPORTER"`
+	// How often each connection's QUIC stats (RTT, loss) are sampled. 0 = only at close.
+	QUICStatsInterval time.Duration `default:"15s" env:"QUIC_STATS_INTERVAL"`
 }
 
 type AppConfig struct {

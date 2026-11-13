@@ -28,17 +28,18 @@ const (
 )
 
 type Server struct {
-	cfg   config.Config
-	tls   *tls.Config
-	auth  auth.AuthServiceImpl
-	rooms room.RoomServiceImpl
+	cfg     config.Config
+	tls     *tls.Config
+	auth    auth.AuthServiceImpl
+	rooms   room.RoomServiceImpl
+	metrics *metrics.Metrics
 }
 
-func NewServer(cfg config.Config, tlsConf *tls.Config, a auth.AuthServiceImpl, r room.RoomServiceImpl) *Server {
+func NewServer(cfg config.Config, tlsConf *tls.Config, a auth.AuthServiceImpl, r room.RoomServiceImpl, m *metrics.Metrics) *Server {
 	tlsConf = tlsConf.Clone()
 	tlsConf.NextProtos = []string{wire.ALPN}
 	tlsConf.MinVersion = tls.VersionTLS13
-	return &Server{cfg: cfg, tls: tlsConf, auth: a, rooms: r}
+	return &Server{cfg: cfg, tls: tlsConf, auth: a, rooms: r, metrics: m}
 }
 
 // Serve listens until ctx is cancelled.
@@ -75,8 +76,8 @@ func (s *Server) Serve(ctx context.Context) error {
 }
 
 func (s *Server) handle(ctx context.Context, conn *quic.Conn) {
-	metrics.Connections.Inc()
-	defer metrics.Connections.Dec()
+	s.metrics.ConnectionOpened(ctx)
+	defer s.metrics.ConnectionClosed(context.WithoutCancel(ctx))
 
 	l := logger.FromCtx(ctx).With().Str("remote", conn.RemoteAddr().String()).Logger()
 	ctx = logger.WithLogger(conn.Context(), l)

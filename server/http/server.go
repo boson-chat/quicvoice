@@ -8,10 +8,11 @@ import (
 	"time"
 
 	"github.com/boson-chat/quicvoice/server/internal/logger"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-func NewRouter(version string) nethttp.Handler {
+// NewRouter serves /healthz, /version and, on /metrics, metricsHandler (the
+// OTel Prometheus exporter's registry).
+func NewRouter(version string, metricsHandler nethttp.Handler) nethttp.Handler {
 	mux := nethttp.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w nethttp.ResponseWriter, _ *nethttp.Request) {
 		_, _ = w.Write([]byte("ok"))
@@ -19,13 +20,13 @@ func NewRouter(version string) nethttp.Handler {
 	mux.HandleFunc("GET /version", func(w nethttp.ResponseWriter, _ *nethttp.Request) {
 		_, _ = w.Write([]byte(version))
 	})
-	mux.Handle("GET /metrics", promhttp.Handler())
+	mux.Handle("GET /metrics", metricsHandler)
 	return mux
 }
 
 // StartServerWithContext serves until ctx is cancelled.
-func StartServerWithContext(ctx context.Context, addr, version string) error {
-	srv := &nethttp.Server{Addr: addr, Handler: NewRouter(version), ReadHeaderTimeout: 5 * time.Second}
+func StartServerWithContext(ctx context.Context, addr, version string, metricsHandler nethttp.Handler) error {
+	srv := &nethttp.Server{Addr: addr, Handler: NewRouter(version, metricsHandler), ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		<-ctx.Done()
 		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
