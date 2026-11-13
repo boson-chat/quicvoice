@@ -1,8 +1,7 @@
 # On every push to main: semantic-release reads the conventional commits since
 # the last tag (feat → minor, fix/perf/refactor/build → patch). If there is a
 # release, it tags vX.Y.Z, creates the GitHub release, and builds + pushes
-# harbor.floret.dev/boson/quicvoice:<version> and :latest, plus the same tags
-# on ghcr.io/boson-chat/quicvoice for self-hosters.
+# harbor.floret.dev/boson/quicvoice:<version> and :latest.
 # ArgoCD image-updater on terra picks up the new tag and deploys it.
 #
 # Secrets: HARBOR_USERNAME / HARBOR_PASSWORD with push rights to the Harbor
@@ -22,12 +21,9 @@ permissions:
   contents: write
   issues: write
   pull-requests: write
-  packages: write
 
 env:
   IMAGE: harbor.floret.dev/boson/quicvoice
-  # Public copy for self-hosters (boson-chat/stack).
-  GHCR_IMAGE: ghcr.io/boson-chat/quicvoice
 
 jobs:
   test:
@@ -57,12 +53,6 @@ jobs:
           registry: harbor.floret.dev
           username: ${{ secrets.HARBOR_USERNAME }}
           password: ${{ secrets.HARBOR_PASSWORD }}
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
       - name: semantic-release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
