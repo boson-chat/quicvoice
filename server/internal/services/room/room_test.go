@@ -7,6 +7,7 @@ import (
 
 	"github.com/boson-chat/quicvoice/gen/controlpb"
 	"github.com/boson-chat/quicvoice/server/internal/services/auth"
+	"github.com/boson-chat/quicvoice/server/metrics"
 	"github.com/boson-chat/quicvoice/wire"
 )
 
@@ -40,7 +41,7 @@ func uplink(seq uint16) []byte {
 
 func TestForwardReachesOthersOnly(t *testing.T) {
 	ctx := context.Background()
-	s := NewRoomService(10)
+	s := NewRoomService(10, metrics.Noop())
 	pa, pb, pc := &fakePeer{}, &fakePeer{}, &fakePeer{}
 	a, _, err := s.Join(ctx, "r", ident("a", controlpb.Role_SPEAKER), pa)
 	if err != nil {
@@ -71,7 +72,7 @@ func TestForwardReachesOthersOnly(t *testing.T) {
 
 func TestMutedListenerDeafened(t *testing.T) {
 	ctx := context.Background()
-	s := NewRoomService(10)
+	s := NewRoomService(10, metrics.Noop())
 	pa, pb := &fakePeer{}, &fakePeer{}
 	listener, _, _ := s.Join(ctx, "r", ident("l", controlpb.Role_LISTENER), pa)
 	speaker, _, _ := s.Join(ctx, "r", ident("s", controlpb.Role_SPEAKER), pb)
@@ -97,7 +98,7 @@ func TestMutedListenerDeafened(t *testing.T) {
 
 func TestLeaveAndRoomCleanup(t *testing.T) {
 	ctx := context.Background()
-	s := NewRoomService(1).(*RoomService)
+	s := NewRoomService(1, metrics.Noop()).(*RoomService)
 	pa := &fakePeer{}
 	a, _, _ := s.Join(ctx, "r", ident("a", controlpb.Role_SPEAKER), pa)
 	if _, _, err := s.Join(ctx, "r", ident("b", controlpb.Role_SPEAKER), &fakePeer{}); err != ErrRoomFull {
@@ -119,7 +120,7 @@ func TestLeaveAndRoomCleanup(t *testing.T) {
 
 func TestSessionIDsNotReusedImmediately(t *testing.T) {
 	ctx := context.Background()
-	s := NewRoomService(10)
+	s := NewRoomService(10, metrics.Noop())
 	a, _, _ := s.Join(ctx, "r", ident("a", controlpb.Role_SPEAKER), &fakePeer{})
 	keep, _, _ := s.Join(ctx, "r", ident("k", controlpb.Role_SPEAKER), &fakePeer{})
 	s.Leave(ctx, a, "")

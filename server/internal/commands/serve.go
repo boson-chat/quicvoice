@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/boson-chat/quicvoice/server/config"
 	"github.com/boson-chat/quicvoice/server/http"
@@ -14,6 +15,7 @@ import (
 	"github.com/boson-chat/quicvoice/server/internal/services/auth"
 	"github.com/boson-chat/quicvoice/server/internal/services/room"
 	"github.com/boson-chat/quicvoice/server/internal/transport"
+	"github.com/boson-chat/quicvoice/server/metrics"
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
 )
@@ -34,6 +36,20 @@ var serveCmd = &cobra.Command{
 		defer stop()
 		ctx = logger.WithLogger(ctx, l)
 
+		// 0. Telemetry
+		provider, err := metrics.NewProvider(ctx, cfg)
+		if err != nil {
+			return err
+		}
+		defer shutdownMetrics(ctx, provider)
+		if p := provider.OTLPProtocol(); p != "" {
+			l.Info().Str("protocol", p).Msg("OTLP metrics push enabled")
+		}
+		m, err := metrics.New(provider.MeterProvider())
+		if err != nil {
+			return err
+		}
+
 		// 1. Services
 		authService, err := buildAuth(cfg)
 		if err != nil {
@@ -42,20 +58,32 @@ var serveCmd = &cobra.Command{
 		if cfg.AuthConfig.Insecure {
 			l.Warn().Msg("AUTH_INSECURE is on: any token is accepted")
 		}
-		roomService := room.NewRoomService(cfg.RoomConfig.MaxParticipants)
+		roomService := room.NewRoomService(cfg.RoomConfig.MaxParticipants, m)
 
 		// 2. Transport
 		tlsConf, err := buildTLS(cfg)
 		if err != nil {
 			return err
 		}
-		quicServer := transport.NewServer(cfg, tlsConf, authService, roomService)
+		quicServer := transport.NewServer(cfg, tlsConf, authService, roomService, m)
 
 		g, gctx := errgroup.WithContext(ctx)
 		g.Go(func() error { return quicServer.Serve(gctx) })
-		g.Go(func() error { return http.StartServerWithContext(gctx, cfg.HTTPConfig.Addr, cfg.AppConfig.Version) })
+		g.Go(func() error {
+			return http.StartServerWithContext(gctx, cfg.HTTPConfig.Addr, cfg.AppConfig.Version, provider.Handler())
+		})
 		return g.Wait()
 	},
+}
+
+// shutdownMetrics flushes pending OTLP exports. ctx is already cancelled on
+// SIGTERM, so it gets its own deadline.
+func shutdownMetrics(ctx context.Context, p *metrics.Provider) {
+	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := p.Shutdown(sctx); err != nil {
+		logger.FromCtx(ctx).Warn().Err(err).Msg("metrics shutdown")
+	}
 }
 
 func buildAuth(cfg config.Config) (auth.AuthServiceImpl, error) {
