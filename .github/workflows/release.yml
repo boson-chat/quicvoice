@@ -33,7 +33,9 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: go test -race ./...
+      - name: libopus (client/voice uses cgo)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libopus-dev
+      - run: go test -race -tags nolibopusfile ./...
 
   release:
     needs: test
