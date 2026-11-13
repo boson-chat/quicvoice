@@ -57,6 +57,12 @@ func (s *JWTAuthService) Verify(_ context.Context, token string) (*Identity, err
 	var c Claims
 	_, err := jwt.ParseWithClaims(token, &c, func(*jwt.Token) (any, error) { return s.secret, nil },
 		jwt.WithValidMethods([]string{"HS256"}), jwt.WithExpirationRequired())
+	return identityFromClaims(&c, err)
+}
+
+// identityFromClaims turns verified claims (or the verification error) into
+// an Identity. Shared by the HMAC and JWKS verifiers.
+func identityFromClaims(c *Claims, err error) (*Identity, error) {
 	if errors.Is(err, jwt.ErrTokenExpired) {
 		return nil, ErrTokenExpired
 	}
