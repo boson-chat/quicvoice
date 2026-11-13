@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+	<dict>
+        <key>NSMicrophoneUsageDescription</key>
+        <string>quicvoice needs the microphone to send your voice.</string>
+		<key>CFBundleExecutable</key>
+		<string>testapp</string>
+		<key>CFBundleGetInfoString</key>
+		<string>Some Product Comments</string>
+		<key>CFBundleIconFile</key>
+		<string>icons</string>
+		<key>CFBundleIconName</key>
+		<string>appicon</string>
+		<key>CFBundleIdentifier</key>
+		<string>chat.boson.quicvoice.testapp</string>
+		<key>CFBundleName</key>
+		<string>quicvoice test</string>
+		<key>CFBundlePackageType</key>
+		<string>APPL</string>
+		<key>CFBundleShortVersionString</key>
+		<string>0.0.1</string>
+		<key>CFBundleVersion</key>
+		<string>0.0.1</string>
+		<key>LSMinimumSystemVersion</key>
+		<string>12.0.0</string>
+		<key>NSAppTransportSecurity</key>
+		<dict>
+			<key>NSAllowsLocalNetworking</key>
+			<true/>
+		</dict>
+		<key>NSHighResolutionCapable</key>
+		<string>true</string>
+		<key>NSHumanReadableCopyright</key>
+		<string>(c) 2026 boson.chat</string>
+	</dict>
+</plist>
