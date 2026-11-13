@@ -1,0 +1,157 @@
+// Control stream messages (draft). Framed as [varint length][ControlMessage].
+syntax = "proto3";
+
+package quicvoice.v1;
+
+option go_package = "quicvoice/gen/controlpb";
+
+message ControlMessage {
+  oneof msg {
+    // handshake
+    Hello hello = 1;
+    Welcome welcome = 2;
+    Error error = 3;
+
+    // rooms
+    Join join = 10;
+    Leave leave = 11;
+    RoomState room_state = 12;
+    ParticipantJoined participant_joined = 13;
+    ParticipantLeft participant_left = 14;
+    ParticipantUpdated participant_updated = 15;
+
+    // self state
+    SetMute set_mute = 20;
+    SetVoiceTarget set_voice_target = 21;
+    SetMetadata set_metadata = 22;
+
+    // server-derived
+    SpeakingChanged speaking_changed = 30;
+    ConnectionQuality connection_quality = 31;
+
+    // moderation
+    Moderate moderate = 40;
+
+    // small app messages (reactions, raise hand, etc.)
+    Data data = 50;
+
+    Ping ping = 60;
+    Pong pong = 61;
+  }
+}
+
+message Hello {
+  string token = 1;          // JWT from the app backend
+  string client_version = 2;
+  repeated string capabilities = 3; // e.g. "fallback-ws", "e2ee-v1"
+}
+
+message Welcome {
+  CodecConfig codec = 1;
+  uint32 max_datagram_payload = 2;
+  repeated string capabilities = 3;
+}
+
+message CodecConfig {
+  string name = 1;           // "opus"
+  uint32 sample_rate = 2;    // 48000
+  uint32 channels = 3;       // 1
+  uint32 frame_ms = 4;       // 20
+  uint32 bitrate = 5;        // 32000
+  bool fec = 6;
+  bool dtx = 7;
+}
+
+message Error {
+  enum Code {
+    UNKNOWN = 0;
+    UNAUTHENTICATED = 1;
+    TOKEN_EXPIRED = 2;
+    FORBIDDEN = 3;
+    ROOM_FULL = 4;
+    ROOM_NOT_FOUND = 5;
+    PROTOCOL = 6;
+    KICKED = 7;
+    BANNED = 8;
+  }
+  Code code = 1;
+  string message = 2;
+  bool fatal = 3;            // server closes the connection after sending
+}
+
+message Join { string room = 1; }
+message Leave {}
+
+message Participant {
+  uint32 session_id = 1;     // u16 on the wire in datagrams
+  string user_id = 2;
+  string display_name = 3;
+  Role role = 4;
+  bool self_muted = 5;
+  bool server_muted = 6;
+  bool deafened = 7;
+  map<string, string> metadata = 8; // app-defined (avatar, etc.)
+}
+
+enum Role {
+  ROLE_UNSPECIFIED = 0;
+  LISTENER = 1;
+  SPEAKER = 2;
+  MODERATOR = 3;
+  ADMIN = 4;
+}
+
+message RoomState {
+  string room = 1;
+  uint32 your_session_id = 2;
+  repeated Participant participants = 3;
+  map<string, string> metadata = 4;
+}
+
+message ParticipantJoined { Participant participant = 1; }
+message ParticipantLeft { uint32 session_id = 1; string reason = 2; }
+message ParticipantUpdated { Participant participant = 1; }
+
+message SetMute {
+  bool muted = 1;
+  bool deafened = 2;         // server stops sending you audio
+}
+
+// Define what datagram `target` N means (1-31). Empty session_ids clears it.
+message SetVoiceTarget {
+  uint32 id = 1;
+  repeated uint32 session_ids = 2;
+}
+
+message SetMetadata { map<string, string> metadata = 1; }
+
+message SpeakingChanged {
+  uint32 session_id = 1;
+  bool speaking = 2;
+}
+
+message ConnectionQuality {
+  uint32 session_id = 1;
+  enum Level { UNKNOWN = 0; POOR = 1; GOOD = 2; EXCELLENT = 3; }
+  Level level = 2;
+}
+
+message Moderate {
+  uint32 session_id = 1;
+  oneof action {
+    bool server_mute = 2;
+    Role set_role = 3;
+    string kick_reason = 4;
+    string ban_reason = 5;
+  }
+}
+
+message Data {
+  uint32 from_session_id = 1; // set by server
+  repeated uint32 to = 2;     // empty = whole room
+  string topic = 3;
+  bytes payload = 4;          // small; server enforces a cap
+}
+
+message Ping { uint64 id = 1; }
+message Pong { uint64 id = 1; }
