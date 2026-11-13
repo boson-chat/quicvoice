@@ -63,6 +63,12 @@ type AuthConfig struct {
 	JWTSecret string `env:"JWT_SECRET"`
 	// Accept any token as the user id. Dev/testing only.
 	Insecure bool `default:"false" env:"AUTH_INSECURE"`
+	// boson auth service: verify its EdDSA tokens via JWKS, e.g.
+	// https://auth.example.com/.well-known/jwks.json. Can be combined with
+	// JWT_SECRET during a migration (routed by the token's alg).
+	JWKSURL  string `env:"AUTH_JWKS_URL"`
+	Issuer   string `env:"AUTH_ISSUER"`
+	Audience string `default:"quicvoice" env:"AUTH_AUDIENCE"`
 }
 
 type RoomConfig struct {

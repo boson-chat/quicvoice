@@ -23,10 +23,17 @@ var (
 	// ErrDatagramTooLarge is returned (wrapped) by Peer.SendDatagram when the
 	// datagram doesn't fit the receiver's current path MTU.
 	ErrDatagramTooLarge = errors.New("room: datagram too large for path")
+
+	// ErrSendQueueFull is returned by Peer.SendDatagram when the receiver's
+	// downlink queue is full. Peers must never block the forwarding loop.
+	ErrSendQueueFull = errors.New("room: receiver send queue full")
 )
 
 // Peer is the transport side of a participant.
 type Peer interface {
+	// SendDatagram queues b for the receiver. It must not block: Forward
+	// calls it for every receiver in turn, so one slow receiver would stall
+	// audio for the whole room.
 	SendDatagram(b []byte) error
 	SendControl(m *controlpb.ControlMessage) error
 }
@@ -244,7 +251,10 @@ func (s *RoomService) Forward(m *Member, uplink []byte) {
 
 // sendDropReason classifies a SendDatagram failure. Only called on failure.
 func sendDropReason(err error) metrics.DropReason {
-	if errors.Is(err, ErrDatagramTooLarge) {
+	switch {
+	case errors.Is(err, ErrSendQueueFull):
+		return metrics.DropSendQueueFull
+	case errors.Is(err, ErrDatagramTooLarge):
 		return metrics.DropSendTooLarge
 	}
 	return metrics.DropSendFailed

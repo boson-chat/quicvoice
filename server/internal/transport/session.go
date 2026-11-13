@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"io"
 	"sync/atomic"
 	"time"
@@ -25,29 +24,65 @@ const controlQueue = 256
 // as a sender restart, not loss or reordering.
 const maxSeqGap = 50
 
+// Downlink datagrams queued per receiver before new ones are dropped: about
+// 0.3 s of audio with 10 people talking. Audio that late is useless anyway.
+const downlinkQueue = 128
+
 type session struct {
-	srv  *Server
-	conn *quic.Conn
-	out  chan *controlpb.ControlMessage
+	srv   *Server
+	conn  *quic.Conn
+	out   chan *controlpb.ControlMessage
+	dgram chan []byte
 
 	identity *auth.Identity
 	member   atomic.Pointer[room.Member]
 }
 
 func newSession(srv *Server, conn *quic.Conn) *session {
-	return &session{srv: srv, conn: conn, out: make(chan *controlpb.ControlMessage, controlQueue)}
+	return &session{
+		srv:   srv,
+		conn:  conn,
+		out:   make(chan *controlpb.ControlMessage, controlQueue),
+		dgram: make(chan []byte, downlinkQueue),
+	}
 }
 
-// SendDatagram implements room.Peer.
+// SendDatagram implements room.Peer. It only queues: quic-go's SendDatagram
+// blocks while the connection's own send queue is full, so the actual send
+// happens on this receiver's datagramWriter goroutine.
 func (s *session) SendDatagram(b []byte) error {
-	err := s.conn.SendDatagram(b)
-	if err != nil {
-		var tooLarge *quic.DatagramTooLargeError
-		if errors.As(err, &tooLarge) {
-			return fmt.Errorf("%w: %w", room.ErrDatagramTooLarge, err)
+	select {
+	case <-s.conn.Context().Done():
+		return context.Cause(s.conn.Context())
+	default:
+	}
+	select {
+	case s.dgram <- b:
+		return nil
+	default:
+		return room.ErrSendQueueFull
+	}
+}
+
+// datagramWriter sends queued downlinks. Failures here are counted directly,
+// since the forwarding loop has already moved on.
+func (s *session) datagramWriter() {
+	mt := s.srv.metrics
+	for {
+		select {
+		case b := <-s.dgram:
+			if err := s.conn.SendDatagram(b); err != nil {
+				var tooLarge *quic.DatagramTooLargeError
+				if errors.As(err, &tooLarge) {
+					mt.Drop(metrics.DropSendTooLarge)
+				} else {
+					mt.Drop(metrics.DropSendFailed)
+				}
+			}
+		case <-s.conn.Context().Done():
+			return
 		}
 	}
-	return err
 }
 
 // SendControl implements room.Peer. It never blocks: a client that can't keep
@@ -108,6 +143,7 @@ func (s *session) run(ctx context.Context) (err error) {
 	l.Info().Str("client", hello.GetClientVersion()).Msg("authenticated")
 
 	go s.writeLoop(stream)
+	go s.datagramWriter()
 	_ = s.SendControl(welcome(s.srv.cfg.RoomConfig.MaxPayload))
 	mt.Handshake(ctx, metrics.HandshakeOK, time.Since(accepted))
 
@@ -259,8 +295,8 @@ func (s *session) datagramLoop(ctx context.Context) {
 			p.Reply = true
 			out := wire.AppendPing(nil, &p)
 			if err := s.SendDatagram(out); err != nil {
-				if errors.Is(err, room.ErrDatagramTooLarge) {
-					mt.Drop(metrics.DropSendTooLarge)
+				if errors.Is(err, room.ErrSendQueueFull) {
+					mt.Drop(metrics.DropSendQueueFull)
 				} else {
 					mt.Drop(metrics.DropSendFailed)
 				}
