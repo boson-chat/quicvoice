@@ -20,6 +20,6 @@ ENV VERSION=$VERSION ENV=production
 
 # 7700/udp: QUIC voice. 8080/tcp: health + metrics.
 EXPOSE 7700/udp 8080/tcp
-USER nonroot
+USER 65532:65532
 ENTRYPOINT ["./quicvoiced"]
 CMD ["serve"]
