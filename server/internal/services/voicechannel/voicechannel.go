@@ -6,7 +6,16 @@
 // Who may create rooms is the auth service's voice_channel_creation
 // setting (admins | founders | registered), read through the settings
 // service. IRC roles (founder, channel modes) come from Ergo through the
-// ergo service. Auth admins (voice role moderator/admin) bypass every check.
+// ergo service.
+//
+// Network permissions come from the voice token. Tokens with the `perms`
+// claim are judged by it alone: voice.manage_any (manage every dynamic
+// room, create under any policy, no per-user limit, set oper locks),
+// voice.bypass_locks (pass every join/speak lock) and voice.create (needed
+// to create under the founders/registered policies). Older tokens without
+// `perms` keep the legacy rule: auth admins (voice role moderator/admin)
+// pass every check. Rooms can also be limited to network roles (the token's
+// `roles` claim) with allowed_roles.
 //
 // It implements room.Directory (so strict mode only admits registry rooms)
 // and room.JoinPolicy (role locks at Join).
@@ -63,10 +72,13 @@ const (
 )
 
 const (
-	MaxNameLen    = 32 // runes
-	maxIDLen      = 32
-	maxChannelLen = 64 // Ergo limits.channellen in the stack
-	maxPosition   = 1_000_000
+	MaxNameLen = 32 // runes
+	// allowed_roles limits.
+	MaxAllowedRoles = 20
+	MaxRoleNameLen  = 64 // runes
+	maxIDLen        = 32
+	maxChannelLen   = 64 // Ergo limits.channellen in the stack
+	maxPosition     = 1_000_000
 )
 
 type Permissions struct {
@@ -76,6 +88,10 @@ type Permissions struct {
 	// FoundedChannels: with ScopeFounded, the channels the caller may create
 	// rooms under (casefolded, sorted).
 	FoundedChannels []string
+	// ManageAny: the caller can manage every dynamic room (and is exempt
+	// from the per-user limit). BypassLocks: the caller passes every lock.
+	ManageAny   bool
+	BypassLocks bool
 }
 
 // View is one room as the caller sees it.
@@ -100,6 +116,8 @@ type CreateInput struct {
 	MinRole                  roles.Role
 	SpeakRole                roles.Role
 	RequireChannelMembership bool
+	// Network roles, one of which is needed to join. Empty = anyone.
+	AllowedRoles []string
 }
 
 // UpdateInput: nil fields are left alone. The id and parent never change.
@@ -109,6 +127,8 @@ type UpdateInput struct {
 	MinRole                  *roles.Role
 	SpeakRole                *roles.Role
 	RequireChannelMembership *bool
+	// Replaces the list; a pointer to an empty slice clears it.
+	AllowedRoles *[]string
 }
 
 type VoiceChannelServiceImpl interface {
@@ -196,7 +216,7 @@ func NewVoiceChannelService(ctx context.Context, o Options) (*VoiceChannelServic
 		if !had {
 			rec.CreatedAt = s.now().UTC().Truncate(time.Millisecond)
 		}
-		if had && old == rec {
+		if had && old.Equal(rec) {
 			continue
 		}
 		if err := s.repo.Put(ctx, rec); err != nil {
@@ -298,9 +318,50 @@ func (c *caller) standing() (*ergo.Standing, error) {
 	return c.st, c.err
 }
 
+// admin: network admin for management decisions: manage any dynamic room,
+// create under every policy, no per-user limit, may set oper locks. Tokens
+// with a perms claim: voice.manage_any (the role claim is ignored); older
+// tokens: role moderator/admin.
+func (c *caller) admin() bool {
+	if c.id.HasNetworkPerms() {
+		return c.id.HasPerm(auth.PermVoiceManageAny)
+	}
+	return c.id.IsStaff()
+}
+
+// bypass: passes every join/speak lock (min_role, speak_role,
+// require_channel_membership, allowed_roles). Tokens with a perms claim:
+// voice.bypass_locks; older tokens: role moderator/admin.
+func (c *caller) bypass() bool {
+	if c.id.HasNetworkPerms() {
+		return c.id.HasPerm(auth.PermVoiceBypassLocks)
+	}
+	return c.id.IsStaff()
+}
+
+// createPerm: the token allows creating rooms at all (the policy decides
+// where). Tokens with a perms claim need voice.create or voice.manage_any;
+// older tokens always pass this gate.
+func (c *caller) createPerm() bool {
+	return !c.id.HasNetworkPerms() || c.id.HasPerm(auth.PermVoiceCreate) || c.id.HasPerm(auth.PermVoiceManageAny)
+}
+
+// legacyAdmin: an auth admin by the role claim on a token without perms.
+// Only those are oper (and so founder) in every channel; with perms the
+// IRC role is always the real one.
+func (c *caller) legacyAdmin() bool {
+	return !c.id.HasNetworkPerms() && c.id.IsStaff()
+}
+
+// hasAllowedRole: rec has no allowed_roles, or the caller holds one of them.
+// Tokens without a roles claim hold none.
+func (c *caller) hasAllowedRole(rec voiceroom.Record) bool {
+	return len(rec.AllowedRoles) == 0 || slices.ContainsFunc(rec.AllowedRoles, c.id.HasNetworkRole)
+}
+
 // role is the caller's role in channel ("" = no channel: Member).
 func (c *caller) role(channel string) (roles.Role, error) {
-	if c.id.IsStaff() {
+	if c.legacyAdmin() {
 		return roles.Oper, nil
 	}
 	if channel == "" {
@@ -338,8 +399,11 @@ func (c *caller) access(rec voiceroom.Record) (canJoin, canSpeak bool, err error
 	if !c.id.CanJoin(rec.ID) {
 		return false, false, nil
 	}
-	if c.id.IsStaff() {
+	if c.bypass() {
 		return true, c.id.CanSpeak(), nil
+	}
+	if !c.hasAllowedRole(rec) {
+		return false, false, nil
 	}
 	tokenSpeak := c.id.CanSpeak()
 	if rec.Parent == "" {
@@ -365,22 +429,26 @@ func (c *caller) access(rec voiceroom.Record) (canJoin, canSpeak bool, err error
 	return canJoin, canJoin && tokenSpeak && role >= rec.SpeakRole, nil
 }
 
-// canManage: dynamic room, and the caller is an admin, its owner, or the
-// founder of its parent channel.
+// canManage: dynamic room, and the caller is an admin (voice.manage_any),
+// its owner, or the founder of its parent channel.
 func (c *caller) canManage(rec voiceroom.Record) (bool, error) {
 	if rec.Static {
 		return false, nil
 	}
-	if c.id.IsStaff() || (rec.OwnerUserID != "" && rec.OwnerUserID == c.id.UserID) {
+	if c.admin() || (rec.OwnerUserID != "" && rec.OwnerUserID == c.id.UserID) {
 		return true, nil
 	}
 	return c.founds(rec.Parent)
 }
 
 func (s *VoiceChannelService) permissions(c *caller) Permissions {
-	p := Permissions{Policy: s.settings.VoiceChannelCreation(c.ctx), Scope: ScopeNone}
+	p := Permissions{Policy: s.settings.VoiceChannelCreation(c.ctx), Scope: ScopeNone,
+		ManageAny: c.admin(), BypassLocks: c.bypass()}
 	switch {
-	case c.id.IsStaff(), p.Policy == settings.CreateRegistered:
+	case c.admin():
+		p.Scope, p.CanCreate = ScopeAny, true
+	case !c.createPerm():
+	case p.Policy == settings.CreateRegistered:
 		p.Scope, p.CanCreate = ScopeAny, true
 	case p.Policy == settings.CreateFounders:
 		p.Scope = ScopeFounded
@@ -400,19 +468,22 @@ func (s *VoiceChannelService) AuthorizeJoin(ctx context.Context, roomID string, 
 	if !ok {
 		return false, room.ErrNotFound
 	}
-	canJoin, canSpeak, err := s.caller(ctx, id).access(rec)
+	c := s.caller(ctx, id)
+	canJoin, canSpeak, err := c.access(rec)
 	if err != nil {
 		logger.FromCtx(ctx).Warn().Err(err).Str("room", roomID).Msg("IRC role check failed; join refused")
 		return false, fmt.Errorf("%w: %v", room.ErrForbidden, ErrUnavailable)
 	}
 	if !canJoin {
-		return false, fmt.Errorf("%w: %s", room.ErrForbidden, lockText(rec))
+		return false, fmt.Errorf("%w: %s", room.ErrForbidden, lockText(c, rec))
 	}
 	return canSpeak, nil
 }
 
-func lockText(r voiceroom.Record) string {
+func lockText(c *caller, r voiceroom.Record) string {
 	switch {
+	case !c.hasAllowedRole(r):
+		return "needs one of these roles: " + strings.Join(r.AllowedRoles, ", ")
 	case r.MinRole >= roles.Oper:
 		return "network admins only"
 	case r.Parent == "":
@@ -490,12 +561,18 @@ func (s *VoiceChannelService) Create(ctx context.Context, id *auth.Identity, in 
 		return View{}, err
 	}
 	rec := voiceroom.Record{Name: name, Parent: parent}
-	if err := applyLocks(c, &rec, &in.MinRole, &in.SpeakRole, &in.RequireChannelMembership); err != nil {
+	if err := applyLocks(c, &rec, &in.MinRole, &in.SpeakRole, &in.RequireChannelMembership, &in.AllowedRoles); err != nil {
 		return View{}, err
 	}
 
+	// Precedence (docs/ROOMS.md): admin (voice.manage_any, or the legacy
+	// role on tokens without perms) anywhere; otherwise the token must allow
+	// creating (voice.create, if it has perms) and then the policy decides.
 	switch p := s.settings.VoiceChannelCreation(ctx); {
-	case id.IsStaff(), p == settings.CreateRegistered:
+	case c.admin():
+	case !c.createPerm():
+		return View{}, fmt.Errorf("%w: you don't have permission to create voice channels", ErrForbidden)
+	case p == settings.CreateRegistered:
 	case p == settings.CreateFounders:
 		if parent == "" {
 			return View{}, fmt.Errorf("%w: voice channels must belong to an IRC channel you founded", ErrForbidden)
@@ -533,7 +610,7 @@ func (s *VoiceChannelService) Create(ctx context.Context, id *auth.Identity, in 
 	if dynamic >= s.maxRooms {
 		return View{}, fmt.Errorf("%w: this server has %d voice channels", ErrLimit, dynamic)
 	}
-	if !id.IsStaff() && owned >= s.perUser {
+	if !c.admin() && owned >= s.perUser {
 		return View{}, fmt.Errorf("%w: you already own %d voice channels", ErrLimit, owned)
 	}
 
@@ -576,7 +653,7 @@ func (s *VoiceChannelService) Update(ctx context.Context, id *auth.Identity, roo
 		}
 		rec.Position = *in.Position
 	}
-	if err := applyLocks(c, &rec, in.MinRole, in.SpeakRole, in.RequireChannelMembership); err != nil {
+	if err := applyLocks(c, &rec, in.MinRole, in.SpeakRole, in.RequireChannelMembership, in.AllowedRoles); err != nil {
 		return View{}, err
 	}
 	if err := s.store(ctx, rec); err != nil {
@@ -647,7 +724,14 @@ func (s *VoiceChannelService) nameTakenLocked(parent, name, except string) bool 
 }
 
 // applyLocks validates and applies lock changes (nil = unchanged).
-func applyLocks(c *caller, rec *voiceroom.Record, minRole, speakRole *roles.Role, requireMember *bool) error {
+func applyLocks(c *caller, rec *voiceroom.Record, minRole, speakRole *roles.Role, requireMember *bool, allowedRoles *[]string) error {
+	if allowedRoles != nil {
+		ar, err := cleanAllowedRoles(*allowedRoles)
+		if err != nil {
+			return err
+		}
+		rec.AllowedRoles = ar
+	}
 	if minRole != nil {
 		rec.MinRole = *minRole
 	}
@@ -667,7 +751,7 @@ func applyLocks(c *caller, rec *voiceroom.Record, minRole, speakRole *roles.Role
 			return fmt.Errorf("%w: require_channel_membership needs a parent channel", ErrInvalid)
 		}
 	}
-	if !c.id.IsStaff() && ((minRole != nil && *minRole == roles.Oper) || (speakRole != nil && *speakRole == roles.Oper)) {
+	if !c.admin() && ((minRole != nil && *minRole == roles.Oper) || (speakRole != nil && *speakRole == roles.Oper)) {
 		return fmt.Errorf("%w: only network admins can lock a room to oper", ErrForbidden)
 	}
 	return nil
@@ -687,6 +771,29 @@ func cleanName(s string) (string, error) {
 		}
 	}
 	return s, nil
+}
+
+// cleanAllowedRoles trims, validates and dedupes (case-insensitively, first
+// spelling wins) a list of network role names. Empty = nil (no restriction).
+func cleanAllowedRoles(in []string) ([]string, error) {
+	var out []string
+	for _, r := range in {
+		r = strings.TrimSpace(r)
+		n := utf8.RuneCountInString(r)
+		if n == 0 || n > MaxRoleNameLen || !utf8.ValidString(r) {
+			return nil, fmt.Errorf("%w: allowed_roles entries must be 1-%d characters", ErrInvalid, MaxRoleNameLen)
+		}
+		if strings.ContainsFunc(r, unicode.IsControl) {
+			return nil, fmt.Errorf("%w: allowed_roles entry has control characters", ErrInvalid)
+		}
+		if !slices.ContainsFunc(out, func(o string) bool { return strings.EqualFold(o, r) }) {
+			out = append(out, r)
+		}
+	}
+	if len(out) > MaxAllowedRoles {
+		return nil, fmt.Errorf("%w: at most %d allowed_roles", ErrInvalid, MaxAllowedRoles)
+	}
+	return out, nil
 }
 
 // cleanChannel validates an IRC channel name and casefolds it ("" stays "").

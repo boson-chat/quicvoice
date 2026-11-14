@@ -65,6 +65,27 @@ func token(t *testing.T, sub, role string, ttl time.Duration, rooms ...string) s
 	return s
 }
 
+// netToken mints a token like the auth service does once it has network
+// roles: roles and perms claims (nil = claim absent).
+func netToken(t *testing.T, sub, role string, netRoles, perms []string) string {
+	t.Helper()
+	c := auth.Claims{
+		Name: sub, Role: role,
+		RegisteredClaims: jwt.RegisteredClaims{Subject: "usr_" + sub, ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Minute))},
+	}
+	if netRoles != nil {
+		c.Roles = &netRoles
+	}
+	if perms != nil {
+		c.Perms = &perms
+	}
+	s, err := jwt.NewWithClaims(jwt.SigningMethodHS256, c).SignedString([]byte(secret))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
 // policyServer fakes the auth service's internal settings endpoint.
 type policyServer struct {
 	mu     sync.Mutex
@@ -183,6 +204,7 @@ type roomOut struct {
 	MinRole                  string     `json:"min_role"`
 	SpeakRole                string     `json:"speak_role"`
 	RequireChannelMembership bool       `json:"require_channel_membership"`
+	AllowedRoles             []string   `json:"allowed_roles"`
 	CanManage                bool       `json:"can_manage"`
 	CanJoin                  bool       `json:"can_join"`
 	CanSpeak                 bool       `json:"can_speak"`
@@ -197,6 +219,8 @@ type listOut struct {
 		CanCreate       bool     `json:"can_create"`
 		CreateScope     string   `json:"create_scope"`
 		FoundedChannels []string `json:"founded_channels"`
+		CanManageAny    bool     `json:"can_manage_any"`
+		BypassLocks     bool     `json:"bypass_locks"`
 	} `json:"permissions"`
 	Rooms []roomOut `json:"rooms"`
 }
@@ -299,7 +323,8 @@ func TestPublicRooms(t *testing.T) {
 		}
 		// Exact shape of one room for the client contract.
 		if !strings.Contains(body, `"participants":[{"session_id":1,"user_id":"usr_1","name":"alice","muted":false,"deafened":false,"speaking":false}]`) ||
-			!strings.Contains(body, `"permissions":{"policy":"admins","can_create":false,"create_scope":"none"}`) {
+			!strings.Contains(body, `"permissions":{"policy":"admins","can_create":false,"create_scope":"none","can_manage_any":false,"bypass_locks":false}`) ||
+			!strings.Contains(body, `"require_channel_membership":false,"allowed_roles":[],"can_manage"`) {
 			t.Errorf("shape: %s", body)
 		}
 	})

@@ -31,6 +31,8 @@ sets a role). Otherwise tokens are HS256 JWTs signed with `JWT_SECRET`:
 
 ```sh
 JWT_SECRET=... go run ./server/cmd token --user u1 --name Alice --room general
+# with roles/perms claims, like the auth service's network-role tokens:
+JWT_SECRET=... go run ./server/cmd token --user u1 --name alice --network-role DJ --perm voice.create
 go run ./examples/bot -addr voice.boson.chat:7700 -token "$TOKEN" -room general
 ```
 
@@ -42,7 +44,10 @@ Rooms live in a registry: **static** rooms from `VOICE_ROOMS`
 id as its name) plus **dynamic** rooms created through the public API,
 optionally under an IRC channel, with join/speak locks on IRC channel roles
 (founder, op, voice, …) looked up in Ergo. Who may create them is the auth
-service's `voice_channel_creation` setting (`admins | founders | registered`).
+service's `voice_channel_creation` setting (`admins | founders | registered`),
+plus the voice token's `perms` claim (`voice.create`, `voice.manage_any`,
+`voice.bypass_locks`) when it has one; rooms can also be limited to network
+roles (`allowed_roles`, matched against the token's `roles` claim).
 The registry is persisted in `VOICE_ROOMS_DB` (JSON). See
 [docs/ROOMS.md](docs/ROOMS.md) for the model, permissions, the Ergo lookups
 and the full API.
@@ -64,9 +69,9 @@ reference in [docs/ROOMS.md](docs/ROOMS.md#api).
 | Route | |
 |---|---|
 | `GET /healthz` | `ok` |
-| `GET /v1/rooms` | Room list with live participants, each room's `parent`, `owner`, locks and the caller's `can_manage`/`can_join`/`can_speak`, plus top-level `permissions` (`can_create`, `create_scope`) |
-| `POST /v1/rooms` | Create a room `{name, parent?, min_role?, speak_role?, require_channel_membership?}` → `201` |
-| `PATCH /v1/rooms/{id}` | Rename / reorder / re-lock `{name?, position?, min_role?, speak_role?, require_channel_membership?}` → `200` |
+| `GET /v1/rooms` | Room list with live participants, each room's `parent`, `owner`, locks (incl. `allowed_roles`) and the caller's `can_manage`/`can_join`/`can_speak`, plus top-level `permissions` (`can_create`, `create_scope`, `can_manage_any`, `bypass_locks`) |
+| `POST /v1/rooms` | Create a room `{name, parent?, min_role?, speak_role?, require_channel_membership?, allowed_roles?}` → `201` |
+| `PATCH /v1/rooms/{id}` | Rename / reorder / re-lock `{name?, position?, min_role?, speak_role?, require_channel_membership?, allowed_roles?}` → `200` |
 | `DELETE /v1/rooms/{id}` | Delete; everyone in it gets `Error{KICKED}` → `204` |
 
 Missing, malformed, invalid or expired token → `401`,

@@ -39,6 +39,20 @@ type Record struct {
 	SpeakRole roles.Role `json:"speak_role"`
 	// Caller's IRC client must be in Parent to join.
 	RequireChannelMembership bool `json:"require_channel_membership,omitempty"`
+	// AllowedRoles: network roles (auth service display names, compared
+	// case-insensitively), one of which is needed to join. Empty = no
+	// restriction. Absent in files written before this field existed.
+	AllowedRoles []string `json:"allowed_roles,omitempty"`
+}
+
+// Equal reports whether r and o are the same record.
+func (r Record) Equal(o Record) bool {
+	return r.ID == o.ID && r.Name == o.Name && r.Parent == o.Parent &&
+		r.OwnerUserID == o.OwnerUserID && r.OwnerName == o.OwnerName &&
+		r.CreatedAt.Equal(o.CreatedAt) && r.Position == o.Position && r.Static == o.Static &&
+		r.MinRole == o.MinRole && r.SpeakRole == o.SpeakRole &&
+		r.RequireChannelMembership == o.RequireChannelMembership &&
+		slices.Equal(r.AllowedRoles, o.AllowedRoles)
 }
 
 var ErrNotFound = errors.New("voiceroom: not found")

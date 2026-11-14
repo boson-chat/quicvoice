@@ -17,6 +17,10 @@ var (
 	tokenRole  string
 	tokenRooms []string
 	tokenTTL   time.Duration
+	// Network roles / perms claims; only set when the flag is given, so
+	// tokens without them still look like pre-network-roles tokens.
+	tokenNetworkRoles []string
+	tokenPerms        []string
 )
 
 // token mints a room token signed with JWT_SECRET, for testing against a real
@@ -33,7 +37,7 @@ var tokenCmd = &cobra.Command{
 			return errors.New("--user is required")
 		}
 		now := time.Now()
-		s, err := jwt.NewWithClaims(jwt.SigningMethodHS256, auth.Claims{
+		claims := auth.Claims{
 			Name:  tokenName,
 			Role:  tokenRole,
 			Rooms: tokenRooms,
@@ -42,7 +46,14 @@ var tokenCmd = &cobra.Command{
 				IssuedAt:  jwt.NewNumericDate(now),
 				ExpiresAt: jwt.NewNumericDate(now.Add(tokenTTL)),
 			},
-		}).SignedString([]byte(secret))
+		}
+		if cmd.Flags().Changed("network-role") {
+			claims.Roles = &tokenNetworkRoles
+		}
+		if cmd.Flags().Changed("perm") {
+			claims.Perms = &tokenPerms
+		}
+		s, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(secret))
 		if err != nil {
 			return err
 		}
@@ -56,6 +67,8 @@ func init() {
 	tokenCmd.Flags().StringVar(&tokenName, "name", "", "display name (defaults to user id)")
 	tokenCmd.Flags().StringVar(&tokenRole, "role", "speaker", "listener | speaker | moderator | admin")
 	tokenCmd.Flags().StringSliceVar(&tokenRooms, "room", nil, "allowed room (repeatable; none = any)")
+	tokenCmd.Flags().StringSliceVar(&tokenNetworkRoles, "network-role", nil, "network role for the roles claim (repeatable; --network-role= for an empty claim)")
+	tokenCmd.Flags().StringSliceVar(&tokenPerms, "perm", nil, "permission for the perms claim, e.g. voice.create (repeatable; --perm= for an empty claim)")
 	tokenCmd.Flags().DurationVar(&tokenTTL, "ttl", time.Hour, "token lifetime")
 	rootCmd.AddCommand(tokenCmd)
 }
