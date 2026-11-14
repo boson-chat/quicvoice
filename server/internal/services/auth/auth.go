@@ -20,13 +20,21 @@ var (
 type Identity struct {
 	UserID      string
 	DisplayName string
-	Role        controlpb.Role
+	// Account is the IRC (Ergo) account name: the auth service's username,
+	// carried in the token's `name` claim. "" = unknown (no IRC roles).
+	Account string
+	Role    controlpb.Role
 	// Rooms the token allows joining. Empty = any room.
 	Rooms []string
 }
 
 func (i *Identity) CanJoin(room string) bool {
 	return len(i.Rooms) == 0 || slices.Contains(i.Rooms, room)
+}
+
+// IsStaff: network-level admin (auth admins get voice role moderator).
+func (i *Identity) IsStaff() bool {
+	return i.Role >= controlpb.Role_MODERATOR
 }
 
 func (i *Identity) CanSpeak() bool {
@@ -73,7 +81,7 @@ func identityFromClaims(c *Claims, err error) (*Identity, error) {
 	if name == "" {
 		name = c.Subject
 	}
-	return &Identity{UserID: c.Subject, DisplayName: name, Role: parseRole(c.Role), Rooms: c.Rooms}, nil
+	return &Identity{UserID: c.Subject, DisplayName: name, Account: c.Name, Role: parseRole(c.Role), Rooms: c.Rooms}, nil
 }
 
 // InsecureAuthService accepts any non-empty token; the token is the user id.
@@ -87,7 +95,7 @@ func (InsecureAuthService) Verify(_ context.Context, token string) (*Identity, e
 		return nil, ErrUnauthenticated
 	}
 	user, role, _ := strings.Cut(token, "@")
-	return &Identity{UserID: user, DisplayName: user, Role: parseRole(role)}, nil
+	return &Identity{UserID: user, DisplayName: user, Account: user, Role: parseRole(role)}, nil
 }
 
 func parseRole(s string) controlpb.Role {

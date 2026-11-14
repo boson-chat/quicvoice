@@ -8,12 +8,16 @@ RUN go mod download
 COPY . .
 ARG TARGETOS TARGETARCH VERSION=dev
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-    go build -trimpath -ldflags="-s -w" -o /out/quicvoiced ./server/cmd
+    go build -trimpath -ldflags="-s -w" -o /out/quicvoiced ./server/cmd \
+ && mkdir -p /out/data
 
 FROM gcr.io/distroless/static-debian12:nonroot
 
 WORKDIR /app
 COPY --from=builder --chown=nonroot:nonroot /out/quicvoiced .
+# Room registry volume (VOICE_ROOMS_DB=/data/rooms.json). Owned by nonroot so
+# a fresh named volume mounted here is writable.
+COPY --from=builder --chown=nonroot:nonroot /out/data /data
 
 ARG VERSION=dev
 ENV VERSION=$VERSION ENV=production

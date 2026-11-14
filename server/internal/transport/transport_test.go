@@ -16,8 +16,10 @@ import (
 	"github.com/boson-chat/quicvoice/server/config"
 	qvhttp "github.com/boson-chat/quicvoice/server/http"
 	"github.com/boson-chat/quicvoice/server/internal/certs"
+	"github.com/boson-chat/quicvoice/server/internal/db/repositories/voiceroom"
 	"github.com/boson-chat/quicvoice/server/internal/services/auth"
 	"github.com/boson-chat/quicvoice/server/internal/services/room"
+	"github.com/boson-chat/quicvoice/server/internal/services/voicechannel"
 	"github.com/boson-chat/quicvoice/server/internal/transport"
 	"github.com/boson-chat/quicvoice/server/metrics"
 	"github.com/boson-chat/quicvoice/wire"
@@ -47,6 +49,19 @@ type testServer struct {
 
 func startServer(t *testing.T, opts ...room.Option) testServer {
 	t.Helper()
+	return startServerWith(t, serverSetup{roomOpts: opts})
+}
+
+type serverSetup struct {
+	roomOpts []room.Option
+	// channels: run the dynamic room registry (strict, with role locks).
+	// Repo defaults to in-memory.
+	channels *voicechannel.Options
+}
+
+func startServerWith(t *testing.T, setup serverSetup) testServer {
+	t.Helper()
+	opts := setup.roomOpts
 	cfg, err := config.LoadConfig()
 	if err != nil {
 		t.Fatal(err)
@@ -73,8 +88,23 @@ func startServer(t *testing.T, opts ...room.Option) testServer {
 	t.Cleanup(httpSrv.Close)
 
 	authService := auth.NewInsecureAuthService()
+	vcOpts := voicechannel.Options{}
+	if setup.channels != nil {
+		vcOpts = *setup.channels
+	}
+	if vcOpts.Repo == nil {
+		vcOpts.Repo, _ = voiceroom.NewRoomRepository("")
+	}
+	vcOpts.Metrics = m
+	vc, err := voicechannel.NewVoiceChannelService(ctx, vcOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if setup.channels != nil {
+		opts = append(opts, room.WithDirectory(vc, true), room.WithJoinPolicy(vc))
+	}
 	rooms := room.NewRoomService(10, m, opts...)
-	publicSrv := httptest.NewServer(qvhttp.NewPublicRouter(authService, rooms))
+	publicSrv := httptest.NewServer(qvhttp.NewPublicRouter(authService, rooms, vc))
 	t.Cleanup(publicSrv.Close)
 
 	srv := transport.NewServer(cfg, &tls.Config{Certificates: []tls.Certificate{cert}}, authService, rooms, m)

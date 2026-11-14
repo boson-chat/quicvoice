@@ -13,6 +13,8 @@ type Config struct {
 	HTTPConfig HTTPConfig
 	AuthConfig AuthConfig
 	RoomConfig RoomConfig
+	// Dynamic voice rooms: auth settings + Ergo role lookups.
+	ChannelConfig ChannelConfig
 
 	TelemetryConfig TelemetryConfig
 }
@@ -85,6 +87,30 @@ type RoomConfig struct {
 	// Only configured rooms can be joined. false = any other name creates an
 	// ad-hoc room (listed after the configured ones).
 	Strict bool `default:"true" env:"VOICE_ROOMS_STRICT"`
+}
+
+// ChannelConfig is the dynamic voice room registry and its permission sources.
+type ChannelConfig struct {
+	// Room registry file (JSON, rewritten atomically). Empty = in memory only:
+	// rooms created through the API are lost on restart.
+	StorePath string `env:"VOICE_ROOMS_DB"`
+	// Auth service internal listener, for GET /internal/v1/settings
+	// (voice_channel_creation). Empty = VOICE_CHANNEL_CREATION only.
+	AuthInternalURL  string `env:"AUTH_INTERNAL_URL"`
+	InternalAPIToken string `env:"INTERNAL_API_TOKEN"`
+	// Used before the first successful settings fetch (and always without
+	// AUTH_INTERNAL_URL): admins | founders | registered.
+	CreationFallback string        `default:"admins" env:"VOICE_CHANNEL_CREATION"`
+	SettingsTTL      time.Duration `default:"30s" env:"SETTINGS_TTL"`
+	// Ergo HTTP API (api section of ircd.yaml), for founder checks and
+	// channel roles. Empty = no IRC roles: only admins pass role locks and
+	// the founders policy.
+	ErgoAPIURL   string        `env:"ERGO_API_URL"`
+	ErgoAPIToken string        `env:"ERGO_API_TOKEN"`
+	ErgoCacheTTL time.Duration `default:"15s" env:"ERGO_CACHE_TTL"`
+	// Dynamic rooms per (non-admin) owner, and in total.
+	MaxPerUser int `default:"10" env:"VOICE_ROOMS_MAX_PER_USER"`
+	MaxRooms   int `default:"500" env:"VOICE_ROOMS_MAX"`
 }
 
 func LoadConfig() (Config, error) {

@@ -169,6 +169,10 @@ func (s *session) handleControl(ctx context.Context, m *controlpb.ControlMessage
 	switch msg := m.Msg.(type) {
 	case *controlpb.ControlMessage_Join:
 		mt.ControlMessage(ctx, metrics.ControlJoin)
+		if mem := s.member.Load(); mem != nil && mem.Closed() {
+			// The server removed us (room deleted); already counted as kicked.
+			s.member.CompareAndSwap(mem, nil)
+		}
 		if s.member.Load() != nil {
 			mt.Join(ctx, metrics.JoinAlreadyInRoom)
 			s.sendError(controlpb.Error_PROTOCOL, room.ErrInRoom.Error(), false)
@@ -216,6 +220,9 @@ func (s *session) handleControl(ctx context.Context, m *controlpb.ControlMessage
 
 func (s *session) leave(ctx context.Context, reason metrics.LeaveReason) {
 	if mem := s.member.Swap(nil); mem != nil {
+		if mem.Closed() {
+			return // removed by the server; counted as kicked then
+		}
 		s.srv.rooms.Leave(ctx, mem, reason.String())
 		s.srv.metrics.Leave(ctx, reason)
 		logger.FromCtx(ctx).Info().Str("room", mem.Room()).Stringer("reason", reason).Msg("left")

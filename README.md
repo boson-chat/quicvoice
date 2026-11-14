@@ -36,12 +36,20 @@ go run ./examples/bot -addr voice.boson.chat:7700 -token "$TOKEN" -room general
 
 ## Rooms
 
-Rooms are configured with `VOICE_ROOMS` (comma-separated `id:Display Name`,
-in display order; default `general:General`). Ids are lowercase
-`[a-z0-9-]{1,32}`; a bare `id` uses the id as its name. With
-`VOICE_ROOMS_STRICT=true` (the default) a `Join` for any other id gets
-`Error{code: ROOM_NOT_FOUND}`. With `false`, other names create ad-hoc rooms
-as before; they're listed after the configured rooms while someone is in
+Rooms live in a registry: **static** rooms from `VOICE_ROOMS`
+(comma-separated `id:Display Name`, in display order; default
+`general:General`; ids are lowercase `[a-z0-9-]{1,32}`, a bare `id` uses the
+id as its name) plus **dynamic** rooms created through the public API,
+optionally under an IRC channel, with join/speak locks on IRC channel roles
+(founder, op, voice, …) looked up in Ergo. Who may create them is the auth
+service's `voice_channel_creation` setting (`admins | founders | registered`).
+The registry is persisted in `VOICE_ROOMS_DB` (JSON). See
+[docs/ROOMS.md](docs/ROOMS.md) for the model, permissions, the Ergo lookups
+and the full API.
+
+With `VOICE_ROOMS_STRICT=true` (the default) a `Join` for any room not in the
+registry gets `Error{code: ROOM_NOT_FOUND}`. With `false`, other names create
+ad-hoc rooms; they're listed after the registry rooms while someone is in
 them. A token's `rooms` claim still limits which rooms a user can join
 (`FORBIDDEN`) and see.
 
@@ -49,29 +57,20 @@ them. A token's `rooms` claim still limits which rooms a user can join
 
 Separate from the internal `:8080` listener, so `/metrics` is never
 exposed. Put it behind a TLS reverse proxy (e.g. `https://voice.boson.chat`).
+Every `/v1` route takes `Authorization: Bearer <voice token>`, verified
+exactly like the QUIC `Hello` (same `aud`/`iss`/JWKS); full request/response
+reference in [docs/ROOMS.md](docs/ROOMS.md#api).
 
 | Route | |
 |---|---|
 | `GET /healthz` | `ok` |
-| `GET /v1/rooms` | Room list with live participants. `Authorization: Bearer <voice token>`, verified exactly like the QUIC `Hello` (same `aud`/`iss`/JWKS) |
+| `GET /v1/rooms` | Room list with live participants, each room's `parent`, `owner`, locks and the caller's `can_manage`/`can_join`/`can_speak`, plus top-level `permissions` (`can_create`, `create_scope`) |
+| `POST /v1/rooms` | Create a room `{name, parent?, min_role?, speak_role?, require_channel_membership?}` → `201` |
+| `PATCH /v1/rooms/{id}` | Rename / reorder / re-lock `{name?, position?, min_role?, speak_role?, require_channel_membership?}` → `200` |
+| `DELETE /v1/rooms/{id}` | Delete; everyone in it gets `Error{KICKED}` → `204` |
 
-`GET /v1/rooms` → `200`, `Content-Type: application/json`,
-`Cache-Control: no-store`:
-
-```json
-{"rooms":[
-  {"id":"general","name":"General","participants":[
-    {"session_id":3,"user_id":"usr_123","name":"alice","muted":false,"deafened":false,"speaking":true}]},
-  {"id":"gaming","name":"Gaming","participants":[]}]}
-```
-
-- Configured rooms in `VOICE_ROOMS` order (then live ad-hoc rooms by id when
-  not strict); rooms the token's `rooms` claim doesn't allow are left out.
-- Participants are sorted by `session_id`. `muted` = self- or server-muted.
-  `speaking` = a voiced frame (VAD bit set) from them was forwarded in the
-  last second.
-- Missing, malformed, invalid or expired token → `401`,
-  `WWW-Authenticate: Bearer realm="quicvoice"`, body `{"error":"..."}`.
+Missing, malformed, invalid or expired token → `401`,
+`WWW-Authenticate: Bearer realm="quicvoice"`, body `{"error":"...","code":"unauthorized"}`.
 
 ## Config (env)
 
@@ -81,7 +80,12 @@ exposed. Put it behind a TLS reverse proxy (e.g. `https://voice.boson.chat`).
 | `HTTP_ADDR` | `:8080` | `/healthz`, `/version`, `/metrics`. Cluster-internal only |
 | `PUBLIC_HTTP_ADDR` | `:8090` | Public API: `GET /v1/rooms`, `GET /healthz`. Empty = off |
 | `VOICE_ROOMS` | `general:General` | Configured rooms, comma-separated `id:Display Name`, in display order. Ids: `[a-z0-9-]{1,32}` |
-| `VOICE_ROOMS_STRICT` | `true` | Only configured rooms can be joined (`ROOM_NOT_FOUND` otherwise). `false` = other names create ad-hoc rooms |
+| `VOICE_ROOMS_STRICT` | `true` | Only registry rooms can be joined (`ROOM_NOT_FOUND` otherwise). `false` = other names create ad-hoc rooms |
+| `VOICE_ROOMS_DB` | — | Room registry file (e.g. `/data/rooms.json`). Empty = in memory: API-created rooms are lost on restart |
+| `AUTH_INTERNAL_URL` / `INTERNAL_API_TOKEN` | — | Auth service internal API, for the `voice_channel_creation` setting (cached `SETTINGS_TTL`, 30s) |
+| `VOICE_CHANNEL_CREATION` | `admins` | `admins` \| `founders` \| `registered`, used until the first settings fetch succeeds (and always without `AUTH_INTERNAL_URL`) |
+| `ERGO_API_URL` / `ERGO_API_TOKEN` | — | Ergo HTTP API for founder checks and channel roles (cached `ERGO_CACHE_TTL`, 15s). Empty = no IRC roles |
+| `VOICE_ROOMS_MAX_PER_USER` / `VOICE_ROOMS_MAX` | 10 / 500 | Dynamic room limits (per non-admin owner / total) |
 | `TLS_CERT_FILE` / `TLS_KEY_FILE` | — | Reloaded when the file changes. Unset = self-signed |
 | `AUTH_JWKS_URL` | — | Verify tokens from the boson auth service (EdDSA/ES256/RS256) via its JWKS, e.g. `https://auth.example.com/.well-known/jwks.json`. Keys are cached and refetched on an unknown `kid` |
 | `AUTH_ISSUER` | — | Required `iss` for JWKS tokens (recommended) |
@@ -150,7 +154,9 @@ sets. Room names, user ids and addresses are never attributes.
 | `quicvoice.handshake.duration` (`quicvoice_handshake_duration_seconds`) | histogram, `s` | — | How long from QUIC accept to Welcome? (successful handshakes only) |
 | `quicvoice.session.duration` (`quicvoice_session_duration_seconds`) | histogram, `s` | `reason` = client_closed, idle_timeout, slow_consumer, protocol_error, server_shutdown, error | How long do sessions last, and how do they end? Lots of `idle_timeout` = clients losing network; `slow_consumer` = control queue full (we disconnected them) |
 | `quicvoice.room.joins` (`quicvoice_room_joins_total`) | counter, `{join}` | `outcome` = ok, full, forbidden, bad_request, already_in_room, not_found | Are people being turned away? (`full` → raise `ROOM_MAX_PARTICIPANTS`; `forbidden` → token room list; `not_found` → room not in `VOICE_ROOMS`) |
-| `quicvoice.room.leaves` (`quicvoice_room_leaves_total`) | counter, `{leave}` | `reason` = left, disconnected | Do people leave on purpose, or drop out? |
+| `quicvoice.room.leaves` (`quicvoice_room_leaves_total`) | counter, `{leave}` | `reason` = left, disconnected, kicked | Do people leave on purpose, or drop out? (`kicked` = their room was deleted) |
+| `quicvoice.room.changes` (`quicvoice_room_changes_total`) | counter, `{change}` | `op` = create, update, delete; `outcome` = ok, forbidden, invalid, conflict, not_found, limit, unavailable, error | Are people creating/deleting voice channels, and why are requests refused? `unavailable` = Ergo unreachable for a founder/role check |
+| `quicvoice.rooms.defined` (`quicvoice_rooms_defined`) | gauge, `{room}` | `kind` = static, dynamic | How many rooms are in the registry? |
 | `quicvoice.control.messages` (`quicvoice_control_messages_total`) | counter, `{message}` | `type` = hello, join, leave, set_mute, ping, unsupported | Control-plane load; `unsupported` = newer clients using messages this server ignores |
 | `quicvoice_datagrams_dropped_total{reason="rate_limited"}` | (above) | | Is someone flooding? |
 
@@ -185,3 +191,4 @@ it only proxies TCP.
 
 - [docs/PLAN.md](docs/PLAN.md): architecture, milestones, open questions
 - [docs/PROTOCOL.md](docs/PROTOCOL.md): datagram format and control stream
+- [docs/ROOMS.md](docs/ROOMS.md): room registry, creation policy, IRC role locks, rooms API
