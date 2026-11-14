@@ -4,22 +4,39 @@ package http
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	nethttp "net/http"
 	"time"
 
 	"github.com/boson-chat/quicvoice/server/http/handlers"
+	"github.com/boson-chat/quicvoice/server/internal/configfile"
 	"github.com/boson-chat/quicvoice/server/internal/logger"
 	"github.com/boson-chat/quicvoice/server/internal/services/auth"
 	"github.com/boson-chat/quicvoice/server/internal/services/room"
 	"github.com/boson-chat/quicvoice/server/internal/services/voicechannel"
 )
 
-// NewRouter serves /healthz, /version and, on /metrics, metricsHandler (the
-// OTel Prometheus exporter's registry). Cluster-internal only.
-func NewRouter(version string, metricsHandler nethttp.Handler) nethttp.Handler {
+// ConfigStatus reports the config file's state (configfile.Watcher).
+type ConfigStatus interface {
+	Status() configfile.Status
+}
+
+// NewRouter serves /healthz, /version, on /metrics metricsHandler (the
+// OTel Prometheus exporter's registry) and GET /internal/config/status
+// (cfg; nil = no config file). Cluster-internal only.
+func NewRouter(version string, metricsHandler nethttp.Handler, cfg ConfigStatus) nethttp.Handler {
 	mux := nethttp.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthz)
+	mux.HandleFunc("GET /internal/config/status", func(w nethttp.ResponseWriter, _ *nethttp.Request) {
+		st := configfile.Status{OK: true, RestartRequired: []string{}}
+		if cfg != nil {
+			st = cfg.Status()
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		_ = json.NewEncoder(w).Encode(st)
+	})
 	mux.HandleFunc("GET /version", func(w nethttp.ResponseWriter, _ *nethttp.Request) {
 		_, _ = w.Write([]byte(version))
 	})
@@ -45,9 +62,9 @@ func healthz(w nethttp.ResponseWriter, _ *nethttp.Request) {
 }
 
 // StartServerWithContext serves the internal router until ctx is cancelled.
-func StartServerWithContext(ctx context.Context, addr, version string, metricsHandler nethttp.Handler) error {
+func StartServerWithContext(ctx context.Context, addr, version string, metricsHandler nethttp.Handler, cfg ConfigStatus) error {
 	return serve(ctx, "HTTP", &nethttp.Server{
-		Addr: addr, Handler: NewRouter(version, metricsHandler), ReadHeaderTimeout: 5 * time.Second,
+		Addr: addr, Handler: NewRouter(version, metricsHandler, cfg), ReadHeaderTimeout: 5 * time.Second,
 	})
 }
 

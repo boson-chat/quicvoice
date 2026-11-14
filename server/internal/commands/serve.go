@@ -12,10 +12,12 @@ import (
 	"github.com/boson-chat/quicvoice/server/config"
 	"github.com/boson-chat/quicvoice/server/http"
 	"github.com/boson-chat/quicvoice/server/internal/certs"
+	"github.com/boson-chat/quicvoice/server/internal/configfile"
 	"github.com/boson-chat/quicvoice/server/internal/db/repositories/voiceroom"
 	"github.com/boson-chat/quicvoice/server/internal/logger"
 	"github.com/boson-chat/quicvoice/server/internal/services/auth"
 	"github.com/boson-chat/quicvoice/server/internal/services/ergo"
+	"github.com/boson-chat/quicvoice/server/internal/services/liveconfig"
 	"github.com/boson-chat/quicvoice/server/internal/services/room"
 	"github.com/boson-chat/quicvoice/server/internal/services/settings"
 	"github.com/boson-chat/quicvoice/server/internal/services/voicechannel"
@@ -29,7 +31,12 @@ var serveCmd = &cobra.Command{
 	Use:   "serve",
 	Short: "Start the QUIC voice server, the public HTTP API and the health/metrics HTTP server",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg := config.LoadConfigOrPanic()
+		base := config.LoadConfigOrPanic()
+		// The stack config file's voice section (BOSON_CONFIG) on top of env.
+		// An invalid file at start: run on env and report it on
+		// /internal/config/status, like an invalid reload.
+		file, fileErr := config.ReadVoiceFile(base.AppConfig.ConfigFile)
+		cfg := file.Effective(base)
 
 		l := logger.Logger(
 			logger.WithServerName(cfg.AppConfig.APPName),
@@ -63,11 +70,14 @@ var serveCmd = &cobra.Command{
 		if cfg.AuthConfig.Insecure {
 			l.Warn().Msg("AUTH_INSECURE is on: any token is accepted")
 		}
-		roomDefs, err := room.ParseDefs(cfg.RoomConfig.Rooms)
-		if err != nil {
-			return fmt.Errorf("VOICE_ROOMS: %w", err)
+		if fileErr != nil {
+			l.Error().Err(fileErr).Msg("config file invalid; starting from env and defaults")
 		}
-		channels, err := buildChannels(ctx, cfg, roomDefs, m)
+		roomDefs, err := liveconfig.StaticDefs(base, file)
+		if err != nil {
+			return err
+		}
+		channels, settingsService, ergoService, err := buildChannels(ctx, cfg, roomDefs, m)
 		if err != nil {
 			return err
 		}
@@ -76,6 +86,16 @@ var serveCmd = &cobra.Command{
 		l.Info().Int("static", len(roomDefs)).Int("total", len(channels.Defs())).Bool("strict", cfg.RoomConfig.Strict).
 			Str("store", cfg.ChannelConfig.StorePath).Bool("ergo_api", cfg.ChannelConfig.ErgoAPIURL != "").
 			Bool("auth_settings", cfg.ChannelConfig.AuthInternalURL != "").Msg("voice rooms configured")
+
+		applier := liveconfig.New(liveconfig.Options{
+			Base: base, Running: cfg, RunningRooms: roomDefs,
+			Rooms: roomService, Channels: channels, Settings: settingsService, Ergo: ergoService,
+		})
+		watcher := configfile.New(base.AppConfig.ConfigFile, applier.Load, configfile.WithLogger(l))
+		_ = watcher.Reload(ctx) // status for the file as started (logged on error)
+		if p := base.AppConfig.ConfigFile; p != "" {
+			l.Info().Str("path", p).Msg("watching the config file")
+		}
 
 		// 2. Transport
 		tlsConf, err := buildTLS(cfg)
@@ -86,8 +106,9 @@ var serveCmd = &cobra.Command{
 
 		g, gctx := errgroup.WithContext(ctx)
 		g.Go(func() error { return quicServer.Serve(gctx) })
+		g.Go(func() error { watcher.Run(gctx); return nil })
 		g.Go(func() error {
-			return http.StartServerWithContext(gctx, cfg.HTTPConfig.Addr, cfg.AppConfig.Version, provider.Handler())
+			return http.StartServerWithContext(gctx, cfg.HTTPConfig.Addr, cfg.AppConfig.Version, provider.Handler(), watcher)
 		})
 		if addr := cfg.HTTPConfig.PublicAddr; addr != "" {
 			g.Go(func() error { return http.StartPublicServerWithContext(gctx, addr, authService, roomService, channels) })
@@ -128,11 +149,14 @@ func buildAuth(ctx context.Context, cfg config.Config) (auth.AuthServiceImpl, er
 	return comp, nil
 }
 
-func buildChannels(ctx context.Context, cfg config.Config, static []room.Def, m *metrics.Metrics) (*voicechannel.VoiceChannelService, error) {
+// buildChannels returns the room registry and the settings and Ergo services
+// it uses (their cache TTLs follow the config file).
+func buildChannels(ctx context.Context, cfg config.Config, static []room.Def, m *metrics.Metrics) (
+	*voicechannel.VoiceChannelService, liveconfig.TTLSetter, liveconfig.TTLSetter, error) {
 	c := cfg.ChannelConfig
 	fallback, err := settings.ParseVoiceCreation(c.CreationFallback)
 	if err != nil {
-		return nil, fmt.Errorf("VOICE_CHANNEL_CREATION: %w", err)
+		return nil, nil, nil, fmt.Errorf("VOICE_CHANNEL_CREATION: %w", err)
 	}
 	if c.ErgoAPIURL != "" && c.ErgoAPIToken == "" {
 		// e.g. a stack without the irc profile: run without IRC roles.
@@ -141,19 +165,27 @@ func buildChannels(ctx context.Context, cfg config.Config, static []room.Def, m 
 	}
 	repo, err := voiceroom.NewRoomRepository(c.StorePath)
 	if err != nil {
-		return nil, fmt.Errorf("VOICE_ROOMS_DB: %w", err)
+		return nil, nil, nil, fmt.Errorf("VOICE_ROOMS_DB: %w", err)
 	}
-	return voicechannel.NewVoiceChannelService(ctx, voicechannel.Options{
-		Repo: repo,
-		Settings: settings.NewSettingsService(settings.Options{
-			URL: c.AuthInternalURL, Token: c.InternalAPIToken, Fallback: fallback, TTL: c.SettingsTTL,
-		}),
-		Ergo:       ergo.NewErgoService(ergo.Options{URL: c.ErgoAPIURL, Token: c.ErgoAPIToken, TTL: c.ErgoCacheTTL}),
+	st := settings.NewSettingsService(settings.Options{
+		URL: c.AuthInternalURL, Token: c.InternalAPIToken, Fallback: fallback, TTL: c.SettingsTTL,
+	})
+	er := ergo.NewErgoService(ergo.Options{URL: c.ErgoAPIURL, Token: c.ErgoAPIToken, TTL: c.ErgoCacheTTL})
+	vc, err := voicechannel.NewVoiceChannelService(ctx, voicechannel.Options{
+		Repo:       repo,
+		Settings:   st,
+		Ergo:       er,
 		Metrics:    m,
 		Static:     static,
 		MaxPerUser: c.MaxPerUser,
 		MaxRooms:   c.MaxRooms,
 	})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	sTTL, _ := st.(liveconfig.TTLSetter)
+	eTTL, _ := er.(liveconfig.TTLSetter)
+	return vc, sTTL, eTTL, nil
 }
 
 func buildTLS(cfg config.Config) (*tls.Config, error) {

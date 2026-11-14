@@ -4,6 +4,7 @@ go 1.27.1
 
 require (
 	github.com/MicahParks/keyfunc/v3 v3.9.2
+	github.com/fsnotify/fsnotify v1.9.0
 	github.com/gen2brain/malgo v0.11.27
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/jinzhu/configor v1.2.2
@@ -24,6 +25,7 @@ require (
 	golang.org/x/sync v0.25.0
 	google.golang.org/protobuf v1.36.12
 	gopkg.in/hraban/opus.v2 v2.0.0-20230925203106-0188a62cb302
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
@@ -56,5 +58,4 @@ require (
 	google.golang.org/genproto/googleapis/api v0.0.0-20260928230214-8a89bd6388cc // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260928230214-8a89bd6388cc // indirect
 	google.golang.org/grpc v1.83.2 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

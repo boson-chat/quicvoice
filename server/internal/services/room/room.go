@@ -138,6 +138,9 @@ type RoomServiceImpl interface {
 	// CloseRoom removes everyone from room, sending each an Error{KICKED,
 	// reason}. Returns how many were removed.
 	CloseRoom(ctx context.Context, room, reason string) int
+	// SetStrict and SetMaxParticipants apply a config file reload.
+	SetStrict(strict bool)
+	SetMaxParticipants(n int)
 	Leave(ctx context.Context, m *Member, reason string)
 	SetMute(ctx context.Context, m *Member, muted, deafened bool)
 	// Forward fans a raw uplink datagram out to the rest of m's room. It is
@@ -147,12 +150,13 @@ type RoomServiceImpl interface {
 }
 
 type RoomService struct {
-	maxParticipants int
+	// maxParticipants and strict can change at runtime (config file reload).
+	maxParticipants atomic.Int64
 	metrics         *metrics.Metrics
 	// dir holds the defined rooms; nil = every room is ad-hoc.
 	dir Directory
 	// strict: only defined rooms can be joined.
-	strict bool
+	strict atomic.Bool
 	policy JoinPolicy
 	now    func() time.Time
 
@@ -172,7 +176,7 @@ func WithRooms(defs []Def, strict bool) Option {
 // WithDirectory sets where defined rooms come from (e.g. the dynamic room
 // registry). strict as for WithRooms.
 func WithDirectory(d Directory, strict bool) Option {
-	return func(s *RoomService) { s.dir, s.strict = d, strict }
+	return func(s *RoomService) { s.dir = d; s.strict.Store(strict) }
 }
 
 // WithJoinPolicy adds room-level join checks (IRC role locks).
@@ -205,13 +209,22 @@ func WithClock(now func() time.Time) Option {
 }
 
 func NewRoomService(maxParticipants int, m *metrics.Metrics, opts ...Option) RoomServiceImpl {
-	s := &RoomService{maxParticipants: maxParticipants, metrics: m, rooms: map[string]*Room{}, now: time.Now}
+	s := &RoomService{metrics: m, rooms: map[string]*Room{}, now: time.Now}
+	s.maxParticipants.Store(int64(maxParticipants))
 	for _, o := range opts {
 		o(s)
 	}
 	m.ObserveRooms(s.stats)
 	return s
 }
+
+// SetStrict changes strict mode at runtime. Members of ad-hoc rooms stay
+// when it is turned on; only new joins are refused.
+func (s *RoomService) SetStrict(strict bool) { s.strict.Store(strict) }
+
+// SetMaxParticipants changes the per-room limit for new joins. Rooms already
+// over it keep their members.
+func (s *RoomService) SetMaxParticipants(n int) { s.maxParticipants.Store(int64(n)) }
 
 func (s *RoomService) List(_ context.Context, id *auth.Identity) []Info {
 	// Copy the room index under the lock; members are then read from each
@@ -231,7 +244,7 @@ func (s *RoomService) List(_ context.Context, id *auth.Identity) []Info {
 			out = append(out, Info{ID: d.ID, Name: d.Name, Participants: live[d.ID].participants(now)})
 		}
 	}
-	if s.strict {
+	if s.strict.Load() {
 		return out
 	}
 	var adhoc []string
@@ -336,7 +349,7 @@ func (s *RoomService) Join(ctx context.Context, name string, id *auth.Identity, 
 	if name == "" {
 		return nil, nil, ErrEmptyRoom
 	}
-	if s.strict && !s.defined(name) {
+	if s.strict.Load() && !s.defined(name) {
 		return nil, nil, ErrNotFound
 	}
 	if !id.CanJoin(name) {
@@ -372,7 +385,7 @@ func (s *RoomService) Join(ctx context.Context, name string, id *auth.Identity, 
 		s.mu.Unlock()
 		return nil, nil, err
 	}
-	if len(r.members) >= s.maxParticipants {
+	if int64(len(r.members)) >= s.maxParticipants.Load() {
 		return fail(ErrRoomFull)
 	}
 	sid, err := r.allocID()

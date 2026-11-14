@@ -2,7 +2,7 @@
 
 quicvoiced keeps a **room registry**:
 
-- **static** rooms from `VOICE_ROOMS` (read-only through the API; edit the env), and
+- **static** rooms from `voice.rooms` in the stack config file (`BOSON_CONFIG`, reloaded live) or else `VOICE_ROOMS` (read-only through the API; edit the file or the env), and
 - **dynamic** rooms people create through the public API, optionally under an
   IRC channel (`parent`), Discord-style.
 
@@ -14,7 +14,10 @@ the registry is in memory and dynamic rooms are lost on restart.
 On every start the registry is reconciled with `VOICE_ROOMS`: each listed room
 is written as static at its list position (renames apply), static rooms no
 longer listed are removed, and dynamic rooms are kept. (A dynamic room whose
-id is later added to `VOICE_ROOMS` becomes static.)
+id is later added to `VOICE_ROOMS` becomes static.) The same reconcile runs
+live whenever `voice.rooms` in the config file changes; people in a removed
+static room are kicked with `voice channel "<name>" was removed from the server
+config` (README: Config file).
 
 ## Who can do what
 
