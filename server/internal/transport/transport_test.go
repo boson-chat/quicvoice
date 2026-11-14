@@ -57,6 +57,9 @@ type serverSetup struct {
 	// channels: run the dynamic room registry (strict, with role locks).
 	// Repo defaults to in-memory.
 	channels *voicechannel.Options
+	// auth: token verifier for QUIC and the public API. nil = insecure
+	// (the token is the user name).
+	auth auth.AuthServiceImpl
 }
 
 func startServerWith(t *testing.T, setup serverSetup) testServer {
@@ -87,7 +90,10 @@ func startServerWith(t *testing.T, setup serverSetup) testServer {
 	httpSrv := httptest.NewServer(qvhttp.NewRouter("test", provider.Handler()))
 	t.Cleanup(httpSrv.Close)
 
-	authService := auth.NewInsecureAuthService()
+	authService := setup.auth
+	if authService == nil {
+		authService = auth.NewInsecureAuthService()
+	}
 	vcOpts := voicechannel.Options{}
 	if setup.channels != nil {
 		vcOpts = *setup.channels

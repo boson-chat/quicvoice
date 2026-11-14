@@ -36,6 +36,10 @@ type permissionsJSON struct {
 	CreateScope string `json:"create_scope"`
 	// Only with create_scope=founded_channels (then always an array).
 	FoundedChannels *[]string `json:"founded_channels,omitempty"`
+	// The caller's effective network permissions (voice.manage_any,
+	// voice.bypass_locks; auth admin on tokens without a perms claim).
+	CanManageAny bool `json:"can_manage_any"`
+	BypassLocks  bool `json:"bypass_locks"`
 }
 
 type ownerJSON struct {
@@ -51,14 +55,16 @@ type roomJSON struct {
 	Owner    *ownerJSON `json:"owner"`
 	Position int        `json:"position"`
 	// RFC 3339; null for ad-hoc rooms.
-	CreatedAt                *time.Time        `json:"created_at"`
-	MinRole                  roles.Role        `json:"min_role"`
-	SpeakRole                roles.Role        `json:"speak_role"`
-	RequireChannelMembership bool              `json:"require_channel_membership"`
-	CanManage                bool              `json:"can_manage"`
-	CanJoin                  bool              `json:"can_join"`
-	CanSpeak                 bool              `json:"can_speak"`
-	Participants             []participantJSON `json:"participants"`
+	CreatedAt                *time.Time `json:"created_at"`
+	MinRole                  roles.Role `json:"min_role"`
+	SpeakRole                roles.Role `json:"speak_role"`
+	RequireChannelMembership bool       `json:"require_channel_membership"`
+	// Network roles one of which is needed to join; always an array.
+	AllowedRoles []string          `json:"allowed_roles"`
+	CanManage    bool              `json:"can_manage"`
+	CanJoin      bool              `json:"can_join"`
+	CanSpeak     bool              `json:"can_speak"`
+	Participants []participantJSON `json:"participants"`
 }
 
 type participantJSON struct {
@@ -93,7 +99,8 @@ func viewJSON(v voicechannel.View, ps []room.ParticipantInfo) roomJSON {
 	j := roomJSON{
 		ID: r.ID, Name: r.Name, Kind: v.Kind, Position: r.Position,
 		MinRole: r.MinRole, SpeakRole: r.SpeakRole, RequireChannelMembership: r.RequireChannelMembership,
-		CanManage: v.CanManage, CanJoin: v.CanJoin, CanSpeak: v.CanSpeak,
+		AllowedRoles: append([]string{}, r.AllowedRoles...),
+		CanManage:    v.CanManage, CanJoin: v.CanJoin, CanSpeak: v.CanSpeak,
 		Participants: participantsJSON(ps),
 	}
 	if r.Parent != "" {
@@ -152,7 +159,8 @@ func (h *RoomsHandler) List(w nethttp.ResponseWriter, r *nethttp.Request) {
 	resp := roomsResponse{
 		Permissions: permissionsJSON{
 			Policy: string(listing.Permissions.Policy), CanCreate: listing.Permissions.CanCreate,
-			CreateScope: string(listing.Permissions.Scope),
+			CreateScope:  string(listing.Permissions.Scope),
+			CanManageAny: listing.Permissions.ManageAny, BypassLocks: listing.Permissions.BypassLocks,
 		},
 		Rooms: make([]roomJSON, 0, len(infos)),
 	}
@@ -180,6 +188,7 @@ type createRequest struct {
 	MinRole                  *roles.Role `json:"min_role"`
 	SpeakRole                *roles.Role `json:"speak_role"`
 	RequireChannelMembership *bool       `json:"require_channel_membership"`
+	AllowedRoles             []string    `json:"allowed_roles"`
 }
 
 // Create serves POST /v1/rooms → 201 with the room.
@@ -192,7 +201,7 @@ func (h *RoomsHandler) Create(w nethttp.ResponseWriter, r *nethttp.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	in := voicechannel.CreateInput{Name: req.Name}
+	in := voicechannel.CreateInput{Name: req.Name, AllowedRoles: req.AllowedRoles}
 	if req.Parent != nil {
 		in.Parent = *req.Parent
 	}
@@ -220,6 +229,8 @@ type updateRequest struct {
 	MinRole                  *roles.Role `json:"min_role"`
 	SpeakRole                *roles.Role `json:"speak_role"`
 	RequireChannelMembership *bool       `json:"require_channel_membership"`
+	// Replaces the list; [] clears it, null/absent leaves it.
+	AllowedRoles *[]string `json:"allowed_roles"`
 	// Parent is immutable; sending it is rejected rather than ignored.
 	Parent json.RawMessage `json:"parent"`
 }
@@ -241,7 +252,7 @@ func (h *RoomsHandler) Update(w nethttp.ResponseWriter, r *nethttp.Request) {
 	roomID := r.PathValue("id")
 	v, err := h.Channels.Update(r.Context(), id, roomID, voicechannel.UpdateInput{
 		Name: req.Name, Position: req.Position, MinRole: req.MinRole, SpeakRole: req.SpeakRole,
-		RequireChannelMembership: req.RequireChannelMembership,
+		RequireChannelMembership: req.RequireChannelMembership, AllowedRoles: req.AllowedRoles,
 	})
 	if err != nil {
 		h.fail(w, r, err)

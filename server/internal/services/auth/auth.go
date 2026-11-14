@@ -26,7 +26,23 @@ type Identity struct {
 	Role    controlpb.Role
 	// Rooms the token allows joining. Empty = any room.
 	Rooms []string
+
+	// Network roles (display names, e.g. "Owner", "DJ") and permissions
+	// (e.g. "voice.create") from the auth service's `roles` / `perms`
+	// claims. HasRoles / HasPerms: the claim was in the token at all, even
+	// as []. Tokens minted before network roles have neither.
+	NetworkRoles []string
+	HasRoles     bool
+	Perms        []string
+	HasPerms     bool
 }
+
+// Voice permissions carried in the `perms` claim. Others are ignored.
+const (
+	PermVoiceCreate      = "voice.create"
+	PermVoiceManageAny   = "voice.manage_any"
+	PermVoiceBypassLocks = "voice.bypass_locks"
+)
 
 func (i *Identity) CanJoin(room string) bool {
 	return len(i.Rooms) == 0 || slices.Contains(i.Rooms, room)
@@ -35,6 +51,18 @@ func (i *Identity) CanJoin(room string) bool {
 // IsStaff: network-level admin (auth admins get voice role moderator).
 func (i *Identity) IsStaff() bool {
 	return i.Role >= controlpb.Role_MODERATOR
+}
+
+// HasNetworkPerms: the token carries the `perms` claim, so permission
+// decisions use it instead of the legacy `role` admin check.
+func (i *Identity) HasNetworkPerms() bool { return i.HasPerms }
+
+// HasPerm: the `perms` claim lists p (exact match).
+func (i *Identity) HasPerm(p string) bool { return slices.Contains(i.Perms, p) }
+
+// HasNetworkRole: the `roles` claim lists name (case-insensitive).
+func (i *Identity) HasNetworkRole(name string) bool {
+	return slices.ContainsFunc(i.NetworkRoles, func(r string) bool { return strings.EqualFold(r, name) })
 }
 
 func (i *Identity) CanSpeak() bool {
@@ -50,6 +78,10 @@ type Claims struct {
 	Name  string   `json:"name"`
 	Role  string   `json:"role"`  // listener | speaker | moderator | admin
 	Rooms []string `json:"rooms"` // allowed rooms; empty = any
+	// Network roles and permissions (auth service). nil = claim absent
+	// (token from before network roles); a pointer to [] = present, empty.
+	Roles *[]string `json:"roles,omitempty"`
+	Perms *[]string `json:"perms,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -81,7 +113,25 @@ func identityFromClaims(c *Claims, err error) (*Identity, error) {
 	if name == "" {
 		name = c.Subject
 	}
-	return &Identity{UserID: c.Subject, DisplayName: name, Account: c.Name, Role: parseRole(c.Role), Rooms: c.Rooms}, nil
+	id := &Identity{UserID: c.Subject, DisplayName: name, Account: c.Name, Role: parseRole(c.Role), Rooms: c.Rooms}
+	if c.Roles != nil {
+		id.HasRoles, id.NetworkRoles = true, nonEmpty(*c.Roles)
+	}
+	if c.Perms != nil {
+		id.HasPerms, id.Perms = true, nonEmpty(*c.Perms)
+	}
+	return id, nil
+}
+
+// nonEmpty copies ss without blank entries (trimmed).
+func nonEmpty(ss []string) []string {
+	out := make([]string, 0, len(ss))
+	for _, s := range ss {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // InsecureAuthService accepts any non-empty token; the token is the user id.
