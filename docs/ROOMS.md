@@ -18,6 +18,38 @@ id is later added to `VOICE_ROOMS` becomes static.)
 
 ## Who can do what
 
+### Network roles and permissions (voice token claims)
+
+The auth service's voice token (`POST /v1/voice/token`) can carry two claims
+from its network roles:
+
+| Claim | | |
+|---|---|---|
+| `roles` | `["Owner", "Moderator", "DJ"]` | Names of the network roles the user holds (display names, compared case-insensitively). Used by the `allowed_roles` lock |
+| `perms` | `["voice.create", "voice.manage_any", …]` | Permission strings. quicvoiced uses the three below and ignores the rest |
+
+| Permission | Grants |
+|---|---|
+| `voice.create` | Creating rooms at all, where the `voice_channel_creation` policy allows (see below). Needed in addition to the policy |
+| `voice.manage_any` | Create anywhere under every policy; rename/reorder/re-lock/delete **any** dynamic room; exempt from `VOICE_ROOMS_MAX_PER_USER`; may set `oper` locks |
+| `voice.bypass_locks` | Join and speak in every room regardless of `min_role`, `speak_role`, `require_channel_membership` and `allowed_roles` (also `oper` locks) |
+
+**Old and new tokens.** A token *with* a `perms` claim (even `[]`) is a
+"new" token and every network-level decision uses its perms only: the
+legacy `role` claim no longer makes anyone a network admin (it still
+decides `listener` vs speaker). A token *without* `perms` (minted before
+network roles) is judged exactly as before: `role` `moderator`/`admin` =
+network admin, which counts as `voice.manage_any` + `voice.bypass_locks`
+and as `oper`/founder in every channel. A missing `roles` claim means "holds
+no roles".
+
+| Decision | Token with `perms` | Token without `perms` (legacy) |
+|---|---|---|
+| Network admin (manage any room, per-user limit exemption, set `oper` locks) | `voice.manage_any` | `role` `moderator`/`admin` |
+| Pass every lock | `voice.bypass_locks` | `role` `moderator`/`admin` |
+| `oper` role / founder of every channel | never (real IRC role only; `oper` locks are passed with `voice.bypass_locks`) | `role` `moderator`/`admin` |
+| Allowed to create at all | `voice.create` or `voice.manage_any` | yes (the policy decides) |
+
 ### Creating rooms: `voice_channel_creation`
 
 The auth service's network setting (admin panel), read from
@@ -32,16 +64,32 @@ the last good value stays; before the first success, `VOICE_CHANNEL_CREATION`
 | `founders` | anywhere | only with `parent` = an IRC channel they are the **founder** of |
 | `registered` | anywhere | anywhere, with or without `parent` |
 
-¹ Network admin = voice token `role` `moderator` or `admin` (the auth service
-gives its admins `moderator`). They also bypass every lock below.
+¹ Network admin = `voice.manage_any` on tokens with `perms`; voice token
+`role` `moderator` or `admin` on tokens without (the auth service gives its
+admins `moderator`).
 
-Per-user limit `VOICE_ROOMS_MAX_PER_USER` (10, admins exempt) and total
-`VOICE_ROOMS_MAX` (500) → `403 limit`.
+On tokens with `perms`, `voice.create` is needed on top of the policy.
+Precedence, first match wins:
+
+| Policy | Token with `perms` | Token without `perms` |
+|---|---|---|
+| any | `voice.manage_any` → anywhere | `role` moderator/admin → anywhere |
+| any | no `voice.create` → `403 forbidden` | — |
+| `admins` | (has `voice.create` only) → `403 forbidden` | `403 forbidden` |
+| `founders` | `voice.create` + founder of `parent` → ok; else `403` (`503` if Ergo is down) | founder of `parent` → ok; else `403` (`503`) |
+| `registered` | `voice.create` → anywhere | anywhere |
+
+`permissions` in `GET /v1/rooms` follows the same table (`create_scope`
+`none` without `voice.create`).
+
+Per-user limit `VOICE_ROOMS_MAX_PER_USER` (10, network admins¹ exempt) and
+total `VOICE_ROOMS_MAX` (500) → `403 limit`.
 
 ### Renaming, reordering, re-locking, deleting
 
 Allowed for: the room's **owner** (its creator), the **founder of its parent
-channel**, or a network admin. Static rooms: nobody (`403 static_room`).
+channel**, or a network admin¹ (`voice.manage_any`). Static rooms: nobody,
+not even `voice.manage_any` (`403 static_room`).
 The id never changes; the parent can't be changed.
 
 ### Roles
@@ -57,11 +105,11 @@ is the source of truth. Lowest to highest:
 | `op` | `@` / `+o` |
 | `admin` | `&` / `+a` (channel admin) |
 | `founder` | `~` / `+q`, or the ChanServ-registered founder |
-| `oper` | network admin (voice token `moderator`/`admin`) |
+| `oper` | network admin |
 
 A user's role in a channel is:
 
-1. `oper` if their token says network admin;
+1. `oper` if their token is a legacy (no `perms`) network admin token;
 2. `founder` if Ergo says they're the registered founder (works offline);
 3. otherwise their **current** prefix mode in that channel, if their IRC client
    is in it (ChanServ `AMODE`s are applied by Ergo on join, so they show up
@@ -79,9 +127,18 @@ boson client's always-on IRC connection this is normally a non-issue.
 | `min_role` | role needed to join | `member` (any registered user) or `oper` (admins only) |
 | `speak_role` | role needed to talk; below it you join as a **listener** | `member` or `oper` |
 | `require_channel_membership` | also be in the IRC channel right now | not allowed |
+| `allowed_roles` | hold at least one of these **network** roles (token `roles` claim, case-insensitive); `[]` = no restriction | same |
 
-Only network admins can set `oper`. Locks are checked at `Join` (refused with
-`Error{FORBIDDEN, "…needs op or higher in #chan"}`; listeners get
+`allowed_roles` comes on top of the IRC locks (both must pass). Tokens
+without a `roles` claim hold no roles, so they're refused from
+`allowed_roles` rooms unless they bypass locks (`voice.bypass_locks`, or the
+legacy admin `role` on a token without `perms`). Static rooms never have
+`allowed_roles`.
+
+`voice.bypass_locks` (legacy: network admin) passes every lock.
+Only network admins¹ can set `oper`. Locks are checked at `Join` (refused with
+`Error{FORBIDDEN, "…needs op or higher in #chan"}`, or `"…needs one of these
+roles: DJ, Owner"` for `allowed_roles`; listeners get
 `Participant.role = LISTENER` and their audio isn't forwarded) and reflected
 in `GET /v1/rooms` as `can_join` / `can_speak`. They are not re-checked while
 someone stays in the room: a later `-o` takes effect on their next join.
@@ -114,9 +171,9 @@ Errors: `{"error": "human text", "code": "<code>"}`.
 
 | Status | `code` | When |
 |---|---|---|
-| 400 | `invalid` | bad JSON, name, parent, role, position, lock combo, or `parent` in PATCH |
+| 400 | `invalid` | bad JSON, name, parent, role, position, `allowed_roles`, lock combo, or `parent` in PATCH |
 | 401 | `unauthorized` | missing/invalid/expired token (+ `WWW-Authenticate: Bearer realm="quicvoice"`) |
-| 403 | `forbidden` | policy or permission says no |
+| 403 | `forbidden` | policy or permission says no (incl. no `voice.create`, setting `oper` without being a network admin) |
 | 403 | `static_room` | change to a `VOICE_ROOMS` room |
 | 403 | `limit` | per-user / total room limit |
 | 404 | `not_found` | no such room (or excluded by the token's `rooms` claim) |
@@ -132,13 +189,16 @@ Errors: `{"error": "human text", "code": "<code>"}`.
     "policy": "founders",
     "can_create": true,
     "create_scope": "founded_channels",
-    "founded_channels": ["#boson"]
+    "founded_channels": ["#boson"],
+    "can_manage_any": false,
+    "bypass_locks": false
   },
   "rooms": [
     {"id": "general", "name": "General", "kind": "static",
      "parent": null, "owner": null, "position": 0,
      "created_at": "2026-11-13T20:00:00.000Z",
      "min_role": "member", "speak_role": "member", "require_channel_membership": false,
+     "allowed_roles": [],
      "can_manage": false, "can_join": true, "can_speak": true,
      "participants": [
        {"session_id": 3, "user_id": "usr_123", "name": "alice",
@@ -147,6 +207,7 @@ Errors: `{"error": "human text", "code": "<code>"}`.
      "parent": "#boson", "owner": {"user_id": "usr_456", "name": "fred"}, "position": 1,
      "created_at": "2026-11-13T21:04:05.123Z",
      "min_role": "voice", "speak_role": "op", "require_channel_membership": false,
+     "allowed_roles": ["DJ", "Owner"],
      "can_manage": true, "can_join": true, "can_speak": true,
      "participants": []}
   ]
@@ -157,6 +218,11 @@ Errors: `{"error": "human text", "code": "<code>"}`.
   `founded_channels` (only under the channels in `founded_channels`, always
   present for this scope, may be `[]`), or `none`. `can_create` is false for
   `none` and for `founded_channels` with no founded channels.
+- `permissions.can_manage_any` / `permissions.bypass_locks`: the caller's
+  effective `voice.manage_any` / `voice.bypass_locks` (for tokens without
+  `perms`: true for network admins). Always present.
+- `allowed_roles`: always an array (`[]` = no restriction), also on static
+  and ad-hoc rooms.
 - Rooms are in display order (`position`, then creation time). With
   `VOICE_ROOMS_STRICT=false`, live ad-hoc rooms follow with `kind: "adhoc"`,
   no owner/parent/`created_at` and no locks.
@@ -171,13 +237,18 @@ Errors: `{"error": "human text", "code": "<code>"}`.
 
 ```json
 {"name": "Game Night", "parent": "#Boson",
- "min_role": "voice", "speak_role": "op", "require_channel_membership": false}
+ "min_role": "voice", "speak_role": "op", "require_channel_membership": false,
+ "allowed_roles": ["DJ", "Owner"]}
 ```
 
 Only `name` is required (1–32 characters after trimming, no control
 characters; unique per parent, case-insensitive). `parent`: an IRC channel
 name (`#…`, ≤ 64 bytes, no spaces, commas or `:*?!@`), stored casefolded;
-omit or `null` for none. Lock fields default to `member`/`member`/`false`.
+omit or `null` for none. Lock fields default to `member`/`member`/`false`/`[]`.
+`allowed_roles`: up to 20 network role names, each 1–64 characters after
+trimming, no control characters; duplicates (case-insensitive) are dropped,
+keeping the first spelling and the order. Any of those rules broken → `400
+invalid`. Allowed with or without `parent`.
 
 Response: the room object as in the list (empty `participants`), plus
 `Location: /v1/rooms/<id>`. The id is generated: a slug of parent + name
@@ -190,11 +261,13 @@ Any subset of:
 
 ```json
 {"name": "Movie Night", "position": 0,
- "min_role": "member", "speak_role": "voice", "require_channel_membership": true}
+ "min_role": "member", "speak_role": "voice", "require_channel_membership": true,
+ "allowed_roles": ["DJ"]}
 ```
 
 `position`: 0–1000000 (rooms are sorted by it; equal positions by creation
-time). Sending `parent` is a `400`. Response: the updated room with live
+time). `allowed_roles` replaces the whole list (same rules as POST); `[]`
+clears it; `null` or absent leaves it. Sending `parent` is a `400`. Response: the updated room with live
 participants. New locks apply to the next join.
 
 ### `DELETE /v1/rooms/{id}` → 204
