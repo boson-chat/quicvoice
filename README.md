@@ -82,9 +82,9 @@ Missing, malformed, invalid or expired token → `401`,
 | Var | Default | |
 |---|---|---|
 | `QUIC_ADDR` | `:7700` | UDP voice listener |
-| `HTTP_ADDR` | `:8080` | `/healthz`, `/version`, `/metrics`. Cluster-internal only |
+| `HTTP_ADDR` | `:8080` | `/healthz`, `/version`, `/metrics`, `/internal/config/status`. Cluster-internal only |
 | `PUBLIC_HTTP_ADDR` | `:8090` | Public API: `GET /v1/rooms`, `GET /healthz`. Empty = off |
-| `VOICE_ROOMS` | `general:General` | Configured rooms, comma-separated `id:Display Name`, in display order. Ids: `[a-z0-9-]{1,32}` |
+| `VOICE_ROOMS` | `general:General` | Configured rooms, comma-separated `id:Display Name`, in display order. Ids: `[a-z0-9-]{1,32}`. `voice.rooms` in the config file wins |
 | `VOICE_ROOMS_STRICT` | `true` | Only registry rooms can be joined (`ROOM_NOT_FOUND` otherwise). `false` = other names create ad-hoc rooms |
 | `VOICE_ROOMS_DB` | — | Room registry file (e.g. `/data/rooms.json`). Empty = in memory: API-created rooms are lost on restart |
 | `AUTH_INTERNAL_URL` / `INTERNAL_API_TOKEN` | — | Auth service internal API, for the `voice_channel_creation` setting (cached `SETTINGS_TTL`, 30s) |
@@ -104,6 +104,71 @@ Missing, malformed, invalid or expired token → `401`,
 | `OTEL_METRICS_EXPORTER` | — | `none` turns OTLP push off even with an endpoint set |
 | `OTEL_METRIC_EXPORT_INTERVAL` | 60000 | OTLP push interval, ms. Other `OTEL_EXPORTER_OTLP_*` vars (headers, timeout, TLS, temporality) and `OTEL_SERVICE_NAME` / `OTEL_RESOURCE_ATTRIBUTES` work as usual |
 | `QUIC_STATS_INTERVAL` | `15s` | How often each connection's QUIC RTT/loss is sampled. `0` = only at close |
+| `BOSON_CONFIG` | — | The boson stack config file (e.g. `/config/boson.yaml`), see below. Unset or missing file = env only |
+
+## Config file (`BOSON_CONFIG`, live reload)
+
+In the boson stack every service shares one non-secret YAML file
+(`config/boson.yaml`, written by the admin panel or by hand). quicvoiced reads
+only its `voice:` section and ignores the rest. A key in the file beats the
+env var, which beats the default; an absent key means "use env / default", so
+removing a key resets it.
+
+```yaml
+version: 1
+voice:
+  # live
+  rooms:                       # VOICE_ROOMS; [] = no static rooms
+    - {id: general, name: General}
+    - music                    # bare id: name = id
+  rooms_strict: true           # VOICE_ROOMS_STRICT
+  max_rooms_per_user: 10       # VOICE_ROOMS_MAX_PER_USER
+  max_rooms: 500               # VOICE_ROOMS_MAX
+  max_participants: 50         # ROOM_MAX_PARTICIPANTS (new joins)
+  settings_ttl: 30s            # SETTINGS_TTL
+  ergo_cache_ttl: 15s          # ERGO_CACHE_TTL
+  # restart required
+  quic_addr: ":7700"           # QUIC_ADDR
+  http_addr: ":8080"           # HTTP_ADDR
+  public_http_addr: ":8090"    # PUBLIC_HTTP_ADDR ("" = off)
+  max_datagrams_per_sec: 60    # MAX_DATAGRAMS_PER_SEC
+  max_datagram_payload: 1000   # MAX_DATAGRAM_PAYLOAD
+```
+
+The file is watched (fsnotify on its directory, since the admin panel
+replaces it atomically, plus an mtime poll every 10 s). On a change:
+
+- **valid**: applied live and logged as `config reloaded`. Static rooms are
+  added, renamed, reordered and removed in the registry; everyone in a removed
+  room gets `KICKED` ("voice channel "Music" was removed from the server
+  config"), like a deleted dynamic room. Turning `rooms_strict` on refuses new
+  joins to ad-hoc rooms but doesn't kick people already in one; lower limits
+  apply to new joins/creations.
+- **invalid**: the last good config stays; the error (with line and column)
+  is logged and served on the status endpoint.
+- keys in the "restart required" group are reported until quicvoiced is
+  restarted with them (or they're changed back).
+
+Mount the config **directory** (e.g. `./config:/config:ro`), not the single
+file: a single-file bind mount keeps the old inode after an atomic replace and
+never sees the change.
+
+`GET :8080/internal/config/status` (internal listener):
+
+```json
+{"path":"/config/boson.yaml","loaded_at":"2026-11-14T10:00:00Z","file_mtime":"2026-11-14T09:59:59Z",
+ "ok":false,"error":"line 4, column 11: voice.rooms: invalid room id \"Bad\" (want lowercase [a-z0-9-]{1,32})",
+ "error_line":4,"error_column":11,"restart_required":["voice.quic_addr"]}
+```
+
+`loaded_at`: when the config in use was applied (`null` if the file was
+invalid from the start: quicvoiced then runs on env); `file_mtime`: `null`
+when the file is missing; `error*` only when `ok` is false.
+
+`quicvoiced export-config` prints a `voice:` section from the current env
+(and the file, if `BOSON_CONFIG` is set) to merge into the file on an
+existing install: `rooms`, `rooms_strict` and `max_rooms_per_user` always,
+the other keys only when their env var is set.
 
 ## Metrics
 

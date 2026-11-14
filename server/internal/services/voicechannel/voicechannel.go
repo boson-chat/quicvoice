@@ -26,6 +26,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
 	"slices"
 	"strconv"
@@ -174,7 +175,7 @@ type VoiceChannelService struct {
 }
 
 // NewVoiceChannelService loads the registry and reconciles it with the
-// static rooms: each VOICE_ROOMS entry is (re)written as a static room at its
+// static rooms (see SetStatic): each VOICE_ROOMS entry is (re)written as a static room at its
 // list position, and static rooms no longer listed are removed. Dynamic
 // rooms are untouched (a dynamic room whose id is now in VOICE_ROOMS becomes
 // static).
@@ -208,10 +209,49 @@ func NewVoiceChannelService(ctx context.Context, o Options) (*VoiceChannelServic
 	for _, r := range recs {
 		s.rooms[r.ID] = r
 	}
+	if _, err := s.reconcileStatic(ctx, o.Static); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	s.publishLocked()
+	s.mu.Unlock()
+	s.metrics.ObserveDefinedRooms(s.stats)
+	return s, nil
+}
+
+// SetStatic replaces the static rooms at runtime (config file reload), the
+// same way the constructor reconciles them: listed rooms are (re)written at
+// their list position, a dynamic room whose id is now listed becomes static,
+// and static rooms no longer listed are removed. It returns the removed
+// rooms; kicking their live participants is the caller's job
+// (room.RoomServiceImpl.CloseRoom), as with Delete.
+func (s *VoiceChannelService) SetStatic(ctx context.Context, static []room.Def) ([]voiceroom.Record, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	return s.reconcileStatic(ctx, static)
+}
+
+// reconcileStatic: see SetStatic. Caller holds writeMu (or is the
+// constructor). Each change is persisted, then published; on an error the
+// changes made so far stay.
+func (s *VoiceChannelService) reconcileStatic(ctx context.Context, static []room.Def) ([]voiceroom.Record, error) {
+	s.mu.RLock()
+	current := maps.Clone(s.rooms)
+	s.mu.RUnlock()
+
 	listed := map[string]bool{}
-	for i, d := range o.Static {
+	var removed []voiceroom.Record
+	changed := false
+	defer func() {
+		if changed {
+			s.mu.Lock()
+			s.publishLocked()
+			s.mu.Unlock()
+		}
+	}()
+	for i, d := range static {
 		listed[d.ID] = true
-		old, had := s.rooms[d.ID]
+		old, had := current[d.ID]
 		rec := voiceroom.Record{ID: d.ID, Name: d.Name, Position: i, Static: true, CreatedAt: old.CreatedAt}
 		if !had {
 			rec.CreatedAt = s.now().UTC().Truncate(time.Millisecond)
@@ -220,21 +260,42 @@ func NewVoiceChannelService(ctx context.Context, o Options) (*VoiceChannelServic
 			continue
 		}
 		if err := s.repo.Put(ctx, rec); err != nil {
-			return nil, err
+			return removed, err
 		}
+		s.mu.Lock()
 		s.rooms[d.ID] = rec
+		s.mu.Unlock()
+		changed = true
 	}
-	for id, r := range s.rooms {
-		if r.Static && !listed[id] {
-			if err := s.repo.Delete(ctx, id); err != nil {
-				return nil, err
-			}
-			delete(s.rooms, id)
+	for id, r := range current {
+		if !r.Static || listed[id] {
+			continue
 		}
+		if err := s.repo.Delete(ctx, id); err != nil {
+			return removed, err
+		}
+		s.mu.Lock()
+		delete(s.rooms, id)
+		s.mu.Unlock()
+		changed = true
+		removed = append(removed, r)
 	}
-	s.publishLocked()
-	s.metrics.ObserveDefinedRooms(s.stats)
-	return s, nil
+	slices.SortFunc(removed, func(a, b voiceroom.Record) int { return cmp.Compare(a.ID, b.ID) })
+	return removed, nil
+}
+
+// SetLimits changes the dynamic room limits at runtime (config file
+// reload). Values <= 0 are left alone. Rooms over a new limit stay; only new
+// creations are refused.
+func (s *VoiceChannelService) SetLimits(maxPerUser, maxRooms int) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	if maxPerUser > 0 {
+		s.perUser = maxPerUser
+	}
+	if maxRooms > 0 {
+		s.maxRooms = maxRooms
+	}
 }
 
 // publishLocked rebuilds the ordered views. Caller holds mu (write) or is

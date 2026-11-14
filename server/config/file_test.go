@@ -1,0 +1,132 @@
+package config
+
+import (
+	"os"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/boson-chat/quicvoice/server/internal/configfile"
+)
+
+func TestParseVoiceFile(t *testing.T) {
+	f, err := ParseVoiceFile([]byte(`version: 1
+network: {name: Boson}
+auth: {registration: open}
+voice:
+  rooms:
+    - {id: general, name: General}
+    - music
+  rooms_strict: false
+  max_rooms_per_user: 3
+  max_rooms: 40
+  max_participants: 25
+  settings_ttl: 1m
+  ergo_cache_ttl: 5s
+  public_http_addr: ""
+  unknown_key: whatever
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rooms, ok := f.StaticRooms()
+	if !ok || !slices.Equal(rooms, []RoomEntry{{"general", "General"}, {"music", "music"}}) {
+		t.Fatalf("rooms = %v %v", rooms, ok)
+	}
+	var base Config
+	base.RoomConfig.Strict = true
+	base.QUICConfig.Addr = ":7700"
+	base.HTTPConfig.PublicAddr = ":8090"
+	c := f.Effective(base)
+	if c.RoomConfig.Strict || c.ChannelConfig.MaxPerUser != 3 || c.ChannelConfig.MaxRooms != 40 ||
+		c.RoomConfig.MaxParticipants != 25 || c.ChannelConfig.SettingsTTL != time.Minute ||
+		c.ChannelConfig.ErgoCacheTTL != 5*time.Second || c.QUICConfig.Addr != ":7700" || c.HTTPConfig.PublicAddr != "" {
+		t.Fatalf("effective = %+v", c)
+	}
+	if got := RestartRequired(base, c); !slices.Equal(got, []string{KeyPublicHTTPAddr}) {
+		t.Fatalf("restart_required = %v", got)
+	}
+}
+
+func TestParseVoiceFileEmpty(t *testing.T) {
+	for _, in := range []string{"", "   \n", "version: 1\n", "voice:\n", "version: 1\nvoice: ~\nirc: {plaintext: true}\n", "voice:\n  rooms_strict:\n"} {
+		f, err := ParseVoiceFile([]byte(in))
+		if err != nil {
+			t.Fatalf("%q: %v", in, err)
+		}
+		if _, ok := f.StaticRooms(); ok || f.RoomsStrict != nil {
+			t.Fatalf("%q: keys %+v", in, f)
+		}
+	}
+	f, err := ParseVoiceFile([]byte("voice:\n  rooms: []\n"))
+	if rooms, ok := f.StaticRooms(); err != nil || !ok || len(rooms) != 0 {
+		t.Fatalf("rooms: [] = %v %v %v", rooms, ok, err)
+	}
+}
+
+func TestParseVoiceFileErrors(t *testing.T) {
+	for _, c := range []struct {
+		in        string
+		line, col int
+		msg       string
+	}{
+		{"voice:\n  rooms: [{id: general}, {id: General}]\n", 2, 31, "invalid room id"},
+		{"voice:\n  rooms:\n    - general\n    - general\n", 4, 7, "duplicate room id"},
+		{"voice:\n  rooms_strict: maybe\n", 2, 17, "rooms_strict"},
+		{"voice:\n  max_participants: 0\n", 2, 21, "must be 1..10000"},
+		{"voice:\n  settings_ttl: 30\n", 2, 17, "not a positive duration"},
+		{"voice:\n  quic_addr: nope\n", 2, 14, "listen address"},
+		{"voice: [1, 2]\n", 1, 8, "must be a mapping"},
+		{"version: 2\nvoice: {}\n", 1, 10, "unsupported config file version"},
+		{"voice:\n  rooms: [\n", 0, 0, "yaml"},
+		{"voice:\n\trooms: []\n", 2, 0, "yaml"},
+	} {
+		_, err := ParseVoiceFile([]byte(c.in))
+		if err == nil || !strings.Contains(err.Error(), c.msg) {
+			t.Fatalf("%q: err = %v, want %q", c.in, err, c.msg)
+		}
+		if c.line == 0 {
+			continue
+		}
+		line, col := configfile.Position(err)
+		if line != c.line || (c.col != 0 && col != c.col) {
+			t.Fatalf("%q: at %d:%d, want %d:%d (%v)", c.in, line, col, c.line, c.col, err)
+		}
+	}
+}
+
+func TestExportVoice(t *testing.T) {
+	var cfg Config
+	cfg.RoomConfig.Strict = true
+	cfg.ChannelConfig.MaxPerUser = 10
+	cfg.ChannelConfig.MaxRooms = 77
+	env := map[string]string{"VOICE_ROOMS_MAX": "77"}
+	out, err := ExportVoice(cfg, VoiceFile{}, []RoomEntry{{"general", "General"}}, func(k string) (string, bool) {
+		v, ok := env[k]
+		return v, ok
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "voice:\n  rooms:\n    - id: general\n      name: General\n  rooms_strict: true\n  max_rooms_per_user: 10\n  max_rooms: 77\n"
+	if string(out) != want {
+		t.Fatalf("export:\n%s\nwant:\n%s", out, want)
+	}
+	// What it prints parses back to the same values.
+	f, err := ParseVoiceFile(out)
+	if err != nil || *f.MaxRooms != 77 || !*f.RoomsStrict {
+		t.Fatalf("round trip: %+v %v", f, err)
+	}
+}
+
+func TestReadVoiceFile(t *testing.T) {
+	if f, err := ReadVoiceFile(t.TempDir() + "/missing.yaml"); err != nil || f.Rooms != nil {
+		t.Fatalf("missing file: %+v %v", f, err)
+	}
+	p := t.TempDir() + "/boson.yaml"
+	_ = os.WriteFile(p, []byte("voice:\n  max_rooms: x\n"), 0o644)
+	if _, err := ReadVoiceFile(p); err == nil || !strings.Contains(err.Error(), p) {
+		t.Fatalf("invalid file: %v", err)
+	}
+}

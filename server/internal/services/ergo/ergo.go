@@ -144,6 +144,17 @@ func NewErgoService(o Options) ErgoServiceImpl {
 	return &ErgoService{opts: o, cache: map[string]cacheEntry{}}
 }
 
+// SetTTL changes how long a Standing is reused (config file reload). <= 0
+// is ignored. Cached entries keep their old expiry.
+func (s *ErgoService) SetTTL(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	s.mu.Lock()
+	s.opts.TTL = d
+	s.mu.Unlock()
+}
+
 func (s *ErgoService) Enabled() bool { return s.opts.URL != "" }
 
 // maxCache bounds the cache; on overflow expired entries are dropped, then

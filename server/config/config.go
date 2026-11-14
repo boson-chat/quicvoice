@@ -39,6 +39,10 @@ type AppConfig struct {
 	APPName string `default:"quicvoiced"`
 	Env     string `default:"development" env:"ENV"`
 	Version string `default:"dev" env:"VERSION"`
+	// The boson stack config file (e.g. /config/boson.yaml); its voice
+	// section beats env and is reloaded live. Empty or missing file = env
+	// and defaults only.
+	ConfigFile string `env:"BOSON_CONFIG"`
 }
 
 type QUICConfig struct {

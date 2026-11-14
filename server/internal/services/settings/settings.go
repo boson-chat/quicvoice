@@ -94,6 +94,17 @@ func NewSettingsService(o Options) SettingsServiceImpl {
 	return &SettingsService{opts: o, current: o.Fallback}
 }
 
+// SetTTL changes how long a fetched value is reused (config file reload).
+// <= 0 is ignored. The current value keeps its old expiry.
+func (s *SettingsService) SetTTL(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	s.mu.Lock()
+	s.opts.TTL = d
+	s.mu.Unlock()
+}
+
 func (s *SettingsService) VoiceChannelCreation(ctx context.Context) VoiceCreation {
 	if s.opts.URL == "" {
 		return s.opts.Fallback

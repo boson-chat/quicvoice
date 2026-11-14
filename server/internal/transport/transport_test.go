@@ -87,7 +87,7 @@ func startServerWith(t *testing.T, setup serverSetup) testServer {
 	if err != nil {
 		t.Fatal(err)
 	}
-	httpSrv := httptest.NewServer(qvhttp.NewRouter("test", provider.Handler()))
+	httpSrv := httptest.NewServer(qvhttp.NewRouter("test", provider.Handler(), nil))
 	t.Cleanup(httpSrv.Close)
 
 	authService := setup.auth
