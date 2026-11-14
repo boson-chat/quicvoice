@@ -3,9 +3,11 @@ package transport_test
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -39,9 +41,11 @@ type testServer struct {
 	addr string
 	// metricsURL is the HTTP router's /metrics, backed by the real provider.
 	metricsURL string
+	// publicURL is the public API router's base URL.
+	publicURL string
 }
 
-func startServer(t *testing.T) testServer {
+func startServer(t *testing.T, opts ...room.Option) testServer {
 	t.Helper()
 	cfg, err := config.LoadConfig()
 	if err != nil {
@@ -68,11 +72,15 @@ func startServer(t *testing.T) testServer {
 	httpSrv := httptest.NewServer(qvhttp.NewRouter("test", provider.Handler()))
 	t.Cleanup(httpSrv.Close)
 
-	srv := transport.NewServer(cfg, &tls.Config{Certificates: []tls.Certificate{cert}},
-		auth.NewInsecureAuthService(), room.NewRoomService(10, m), m)
+	authService := auth.NewInsecureAuthService()
+	rooms := room.NewRoomService(10, m, opts...)
+	publicSrv := httptest.NewServer(qvhttp.NewPublicRouter(authService, rooms))
+	t.Cleanup(publicSrv.Close)
+
+	srv := transport.NewServer(cfg, &tls.Config{Certificates: []tls.Certificate{cert}}, authService, rooms, m)
 	go func() { _ = srv.Serve(ctx) }()
 	time.Sleep(100 * time.Millisecond)
-	return testServer{addr: cfg.QUICConfig.Addr, metricsURL: httpSrv.URL + "/metrics"}
+	return testServer{addr: cfg.QUICConfig.Addr, metricsURL: httpSrv.URL + "/metrics", publicURL: publicSrv.URL}
 }
 
 func TestTwoClientsExchangeAudio(t *testing.T) {
@@ -248,4 +256,104 @@ next:
 		}
 	}
 	return 0, false
+}
+
+type roomsResponse struct {
+	Rooms []struct {
+		ID           string `json:"id"`
+		Name         string `json:"name"`
+		Participants []struct {
+			SessionID uint32 `json:"session_id"`
+			UserID    string `json:"user_id"`
+			Name      string `json:"name"`
+			Muted     bool   `json:"muted"`
+			Deafened  bool   `json:"deafened"`
+			Speaking  bool   `json:"speaking"`
+		} `json:"participants"`
+	} `json:"rooms"`
+}
+
+func getRooms(t *testing.T, base, token string) (int, roomsResponse) {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodGet, base+"/v1/rooms", nil)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out roomsResponse
+	if resp.StatusCode == http.StatusOK {
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return resp.StatusCode, out
+}
+
+// TestRoomsAPI: configured rooms in strict mode, seen through GET /v1/rooms
+// while real QUIC clients are in them.
+func TestRoomsAPI(t *testing.T) {
+	ts := startServer(t, room.WithRooms([]room.Def{{ID: "general", Name: "General"}, {ID: "gaming", Name: "Gaming"}}, true))
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if code, _ := getRooms(t, ts.publicURL, ""); code != http.StatusUnauthorized {
+		t.Fatalf("no token: status %d, want 401", code)
+	}
+
+	dial := func(name string) *client.Client {
+		c, err := client.Dial(ctx, client.Config{Addr: ts.addr, Token: name, InsecureSkipVerify: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = c.Close() })
+		return c
+	}
+	alice, bob := dial("alice"), dial("bob")
+
+	if _, err := alice.Join(ctx, "lobby"); err == nil || !strings.Contains(err.Error(), "ROOM_NOT_FOUND") {
+		t.Fatalf("join unknown room in strict mode: err = %v, want ROOM_NOT_FOUND", err)
+	}
+	as, err := alice.Join(ctx, "general")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bob.Join(ctx, "general"); err != nil {
+		t.Fatal(err)
+	}
+	if err := bob.SetMute(true, false); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 5 {
+		_ = alice.SendAudio(&wire.Uplink{Audio: wire.Audio{
+			Voice: true, Seq: uint16(i), Timestamp: uint32(i * 960), Payload: []byte("x"),
+		}})
+	}
+
+	// SetMute and the audio are async; poll until the list reflects them.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		code, got := getRooms(t, ts.publicURL, "carol")
+		if code != http.StatusOK {
+			t.Fatalf("status %d", code)
+		}
+		ok := len(got.Rooms) == 2 && got.Rooms[0].ID == "general" && got.Rooms[0].Name == "General" &&
+			got.Rooms[1].ID == "gaming" && len(got.Rooms[1].Participants) == 0 &&
+			len(got.Rooms[0].Participants) == 2
+		if ok {
+			a, b := got.Rooms[0].Participants[0], got.Rooms[0].Participants[1]
+			ok = a.UserID == "alice" && a.Name == "alice" && a.SessionID == as.YourSessionId && a.Speaking && !a.Muted &&
+				b.UserID == "bob" && b.Muted && !b.Speaking
+		}
+		if ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("rooms = %+v", got)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }

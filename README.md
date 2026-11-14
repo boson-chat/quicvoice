@@ -20,7 +20,7 @@ examples/bot   headless test client (synthetic frames; load tests)
 ## Run locally
 
 ```sh
-make run                 # server on :7700/udp (self-signed, AUTH_INSECURE) + :8080 health/metrics
+make run                 # server on :7700/udp (self-signed, AUTH_INSECURE), :8090 public API, :8080 health/metrics
 make bot name=alice      # in another terminal
 make bot name=bob        # both report the frames they get from each other
 make test
@@ -30,16 +30,58 @@ With `AUTH_INSECURE=true` the token is just the user name (`alice@listener`
 sets a role). Otherwise tokens are HS256 JWTs signed with `JWT_SECRET`:
 
 ```sh
-JWT_SECRET=... go run ./server/cmd token --user u1 --name Alice --room lobby
-go run ./examples/bot -addr voice.boson.chat:7700 -token "$TOKEN" -room lobby
+JWT_SECRET=... go run ./server/cmd token --user u1 --name Alice --room general
+go run ./examples/bot -addr voice.boson.chat:7700 -token "$TOKEN" -room general
 ```
+
+## Rooms
+
+Rooms are configured with `VOICE_ROOMS` (comma-separated `id:Display Name`,
+in display order; default `general:General`). Ids are lowercase
+`[a-z0-9-]{1,32}`; a bare `id` uses the id as its name. With
+`VOICE_ROOMS_STRICT=true` (the default) a `Join` for any other id gets
+`Error{code: ROOM_NOT_FOUND}`. With `false`, other names create ad-hoc rooms
+as before; they're listed after the configured rooms while someone is in
+them. A token's `rooms` claim still limits which rooms a user can join
+(`FORBIDDEN`) and see.
+
+## Public HTTP API (`PUBLIC_HTTP_ADDR`, default `:8090`)
+
+Separate from the internal `:8080` listener, so `/metrics` is never
+exposed. Put it behind a TLS reverse proxy (e.g. `https://voice.boson.chat`).
+
+| Route | |
+|---|---|
+| `GET /healthz` | `ok` |
+| `GET /v1/rooms` | Room list with live participants. `Authorization: Bearer <voice token>`, verified exactly like the QUIC `Hello` (same `aud`/`iss`/JWKS) |
+
+`GET /v1/rooms` → `200`, `Content-Type: application/json`,
+`Cache-Control: no-store`:
+
+```json
+{"rooms":[
+  {"id":"general","name":"General","participants":[
+    {"session_id":3,"user_id":"usr_123","name":"alice","muted":false,"deafened":false,"speaking":true}]},
+  {"id":"gaming","name":"Gaming","participants":[]}]}
+```
+
+- Configured rooms in `VOICE_ROOMS` order (then live ad-hoc rooms by id when
+  not strict); rooms the token's `rooms` claim doesn't allow are left out.
+- Participants are sorted by `session_id`. `muted` = self- or server-muted.
+  `speaking` = a voiced frame (VAD bit set) from them was forwarded in the
+  last second.
+- Missing, malformed, invalid or expired token → `401`,
+  `WWW-Authenticate: Bearer realm="quicvoice"`, body `{"error":"..."}`.
 
 ## Config (env)
 
 | Var | Default | |
 |---|---|---|
 | `QUIC_ADDR` | `:7700` | UDP voice listener |
-| `HTTP_ADDR` | `:8080` | `/healthz`, `/version`, `/metrics` |
+| `HTTP_ADDR` | `:8080` | `/healthz`, `/version`, `/metrics`. Cluster-internal only |
+| `PUBLIC_HTTP_ADDR` | `:8090` | Public API: `GET /v1/rooms`, `GET /healthz`. Empty = off |
+| `VOICE_ROOMS` | `general:General` | Configured rooms, comma-separated `id:Display Name`, in display order. Ids: `[a-z0-9-]{1,32}` |
+| `VOICE_ROOMS_STRICT` | `true` | Only configured rooms can be joined (`ROOM_NOT_FOUND` otherwise). `false` = other names create ad-hoc rooms |
 | `TLS_CERT_FILE` / `TLS_KEY_FILE` | — | Reloaded when the file changes. Unset = self-signed |
 | `AUTH_JWKS_URL` | — | Verify tokens from the boson auth service (EdDSA/ES256/RS256) via its JWKS, e.g. `https://auth.example.com/.well-known/jwks.json`. Keys are cached and refetched on an unknown `kid` |
 | `AUTH_ISSUER` | — | Required `iss` for JWKS tokens (recommended) |
@@ -107,7 +149,7 @@ sets. Room names, user ids and addresses are never attributes.
 | `quicvoice.handshakes` (`quicvoice_handshakes_total`) | counter, `{handshake}` | `outcome` = ok, no_stream, no_hello, protocol, bad_token, expired | Are logins failing? `expired` spikes = app backend token TTL/clock problems; `bad_token` = wrong `JWT_SECRET` or abuse; `no_stream`/`no_hello` = scanners or broken clients |
 | `quicvoice.handshake.duration` (`quicvoice_handshake_duration_seconds`) | histogram, `s` | — | How long from QUIC accept to Welcome? (successful handshakes only) |
 | `quicvoice.session.duration` (`quicvoice_session_duration_seconds`) | histogram, `s` | `reason` = client_closed, idle_timeout, slow_consumer, protocol_error, server_shutdown, error | How long do sessions last, and how do they end? Lots of `idle_timeout` = clients losing network; `slow_consumer` = control queue full (we disconnected them) |
-| `quicvoice.room.joins` (`quicvoice_room_joins_total`) | counter, `{join}` | `outcome` = ok, full, forbidden, bad_request, already_in_room | Are people being turned away? (`full` → raise `ROOM_MAX_PARTICIPANTS`; `forbidden` → token room list) |
+| `quicvoice.room.joins` (`quicvoice_room_joins_total`) | counter, `{join}` | `outcome` = ok, full, forbidden, bad_request, already_in_room, not_found | Are people being turned away? (`full` → raise `ROOM_MAX_PARTICIPANTS`; `forbidden` → token room list; `not_found` → room not in `VOICE_ROOMS`) |
 | `quicvoice.room.leaves` (`quicvoice_room_leaves_total`) | counter, `{leave}` | `reason` = left, disconnected | Do people leave on purpose, or drop out? |
 | `quicvoice.control.messages` (`quicvoice_control_messages_total`) | counter, `{message}` | `type` = hello, join, leave, set_mute, ping, unsupported | Control-plane load; `unsupported` = newer clients using messages this server ignores |
 | `quicvoice_datagrams_dropped_total{reason="rate_limited"}` | (above) | | Is someone flooding? |

@@ -2,10 +2,14 @@
 package room
 
 import (
+	"cmp"
 	"context"
 	"errors"
+	"maps"
+	"slices"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/boson-chat/quicvoice/gen/controlpb"
 	"github.com/boson-chat/quicvoice/server/internal/services/auth"
@@ -18,6 +22,7 @@ var (
 	ErrForbidden  = errors.New("room: not allowed in this room")
 	ErrInRoom     = errors.New("room: already in a room")
 	ErrEmptyRoom  = errors.New("room: room name required")
+	ErrNotFound   = errors.New("room: no such room")
 	errNoSessions = errors.New("room: no free session ids")
 
 	// ErrDatagramTooLarge is returned (wrapped) by Peer.SendDatagram when the
@@ -48,6 +53,9 @@ type Member struct {
 	selfMuted   atomic.Bool
 	deafened    atomic.Bool
 	serverMuted atomic.Bool
+	// lastVoice is when the member last had a voiced frame forwarded
+	// (UnixNano, 0 = never). Written on the audio hot path, read by List.
+	lastVoice atomic.Int64
 }
 
 func (m *Member) Room() string { return m.room.name }
@@ -74,8 +82,35 @@ type Room struct {
 	snapshot atomic.Pointer[[]*Member]
 }
 
+// SpeakingWindow is how long after their last voiced frame a member still
+// counts as speaking in List.
+const SpeakingWindow = time.Second
+
+// Info is a point-in-time view of one room, for room lists.
+type Info struct {
+	ID           string
+	Name         string
+	Participants []ParticipantInfo
+}
+
+// ParticipantInfo is a point-in-time view of one member.
+type ParticipantInfo struct {
+	SessionID uint16
+	UserID    string
+	Name      string
+	// Muted is self- or server-muted.
+	Muted    bool
+	Deafened bool
+	// Speaking: a voiced frame was forwarded within SpeakingWindow.
+	Speaking bool
+}
+
 type RoomServiceImpl interface {
 	Join(ctx context.Context, room string, id *auth.Identity, p Peer) (*Member, *controlpb.RoomState, error)
+	// List returns the rooms id may join: configured rooms in config order,
+	// then (when not strict) live ad-hoc rooms by name. It never blocks the
+	// audio path.
+	List(ctx context.Context, id *auth.Identity) []Info
 	Leave(ctx context.Context, m *Member, reason string)
 	SetMute(ctx context.Context, m *Member, muted, deafened bool)
 	// Forward fans a raw uplink datagram out to the rest of m's room. It is
@@ -87,15 +122,101 @@ type RoomServiceImpl interface {
 type RoomService struct {
 	maxParticipants int
 	metrics         *metrics.Metrics
+	// defs are the configured rooms, in display order. Read-only after
+	// construction.
+	defs    []Def
+	defined map[string]bool
+	// strict: only configured rooms can be joined.
+	strict bool
+	now    func() time.Time
 
 	mu    sync.Mutex
 	rooms map[string]*Room
 }
 
-func NewRoomService(maxParticipants int, m *metrics.Metrics) RoomServiceImpl {
-	s := &RoomService{maxParticipants: maxParticipants, metrics: m, rooms: map[string]*Room{}}
+type Option func(*RoomService)
+
+// WithRooms sets the configured rooms. With strict, Join rejects any other
+// room with ErrNotFound; without it, other names still create ad-hoc rooms.
+// Without this option every room is ad-hoc.
+func WithRooms(defs []Def, strict bool) Option {
+	return func(s *RoomService) {
+		s.defs = slices.Clone(defs)
+		s.strict = strict
+		s.defined = make(map[string]bool, len(defs))
+		for _, d := range defs {
+			s.defined[d.ID] = true
+		}
+	}
+}
+
+// WithClock replaces time.Now (tests).
+func WithClock(now func() time.Time) Option {
+	return func(s *RoomService) { s.now = now }
+}
+
+func NewRoomService(maxParticipants int, m *metrics.Metrics, opts ...Option) RoomServiceImpl {
+	s := &RoomService{maxParticipants: maxParticipants, metrics: m, rooms: map[string]*Room{}, now: time.Now}
+	for _, o := range opts {
+		o(s)
+	}
 	m.ObserveRooms(s.stats)
 	return s
+}
+
+func (s *RoomService) List(_ context.Context, id *auth.Identity) []Info {
+	// Copy the room index under the lock; members are then read from each
+	// room's lock-free snapshot.
+	s.mu.Lock()
+	live := maps.Clone(s.rooms)
+	s.mu.Unlock()
+
+	now := s.now().UnixNano()
+	out := make([]Info, 0, len(s.defs))
+	for _, d := range s.defs {
+		if id.CanJoin(d.ID) {
+			out = append(out, Info{ID: d.ID, Name: d.Name, Participants: live[d.ID].participants(now)})
+		}
+	}
+	if s.strict {
+		return out
+	}
+	var adhoc []string
+	for name := range live {
+		if !s.defined[name] && id.CanJoin(name) {
+			adhoc = append(adhoc, name)
+		}
+	}
+	slices.Sort(adhoc)
+	for _, name := range adhoc {
+		out = append(out, Info{ID: name, Name: name, Participants: live[name].participants(now)})
+	}
+	return out
+}
+
+// participants lists r's members by session id. nil r = no members.
+func (r *Room) participants(now int64) []ParticipantInfo {
+	out := []ParticipantInfo{}
+	if r == nil {
+		return out
+	}
+	members := r.snapshot.Load()
+	if members == nil {
+		return out
+	}
+	for _, m := range *members {
+		last := m.lastVoice.Load()
+		out = append(out, ParticipantInfo{
+			SessionID: m.SessionID,
+			UserID:    m.Identity.UserID,
+			Name:      m.Identity.DisplayName,
+			Muted:     m.selfMuted.Load() || m.serverMuted.Load(),
+			Deafened:  m.deafened.Load(),
+			Speaking:  last != 0 && now-last < int64(SpeakingWindow),
+		})
+	}
+	slices.SortFunc(out, func(a, b ParticipantInfo) int { return cmp.Compare(a.SessionID, b.SessionID) })
+	return out
 }
 
 // stats is read by the metrics collector (every scrape / export interval).
@@ -125,6 +246,9 @@ func (s *RoomService) stats() metrics.RoomStats {
 func (s *RoomService) Join(_ context.Context, name string, id *auth.Identity, p Peer) (*Member, *controlpb.RoomState, error) {
 	if name == "" {
 		return nil, nil, ErrEmptyRoom
+	}
+	if s.strict && !s.defined[name] {
+		return nil, nil, ErrNotFound
 	}
 	if !id.CanJoin(name) {
 		return nil, nil, ErrForbidden
@@ -226,7 +350,11 @@ func (s *RoomService) Forward(m *Member, uplink []byte) {
 	if members == nil {
 		return
 	}
-	mt.FrameForwarded(uplink[2]&0x80 != 0)
+	voiced := uplink[2]&0x80 != 0
+	if voiced {
+		m.lastVoice.Store(s.now().UnixNano())
+	}
+	mt.FrameForwarded(voiced)
 	sent, bytes := 0, 0
 	for _, o := range *members {
 		if o == m || o.deafened.Load() {

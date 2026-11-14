@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"os/signal"
 	"syscall"
 	"time"
@@ -22,7 +23,7 @@ import (
 
 var serveCmd = &cobra.Command{
 	Use:   "serve",
-	Short: "Start the QUIC voice server and the health/metrics HTTP server",
+	Short: "Start the QUIC voice server, the public HTTP API and the health/metrics HTTP server",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg := config.LoadConfigOrPanic()
 
@@ -58,7 +59,13 @@ var serveCmd = &cobra.Command{
 		if cfg.AuthConfig.Insecure {
 			l.Warn().Msg("AUTH_INSECURE is on: any token is accepted")
 		}
-		roomService := room.NewRoomService(cfg.RoomConfig.MaxParticipants, m)
+		roomDefs, err := room.ParseDefs(cfg.RoomConfig.Rooms)
+		if err != nil {
+			return fmt.Errorf("VOICE_ROOMS: %w", err)
+		}
+		roomService := room.NewRoomService(cfg.RoomConfig.MaxParticipants, m,
+			room.WithRooms(roomDefs, cfg.RoomConfig.Strict))
+		l.Info().Int("rooms", len(roomDefs)).Bool("strict", cfg.RoomConfig.Strict).Msg("voice rooms configured")
 
 		// 2. Transport
 		tlsConf, err := buildTLS(cfg)
@@ -72,6 +79,9 @@ var serveCmd = &cobra.Command{
 		g.Go(func() error {
 			return http.StartServerWithContext(gctx, cfg.HTTPConfig.Addr, cfg.AppConfig.Version, provider.Handler())
 		})
+		if addr := cfg.HTTPConfig.PublicAddr; addr != "" {
+			g.Go(func() error { return http.StartPublicServerWithContext(gctx, addr, authService, roomService) })
+		}
 		return g.Wait()
 	},
 }

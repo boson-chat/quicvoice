@@ -57,10 +57,11 @@ const (
 	JoinForbidden
 	JoinBadRequest    // e.g. empty room name
 	JoinAlreadyInRoom // client bug: Join while still in a room
+	JoinNotFound      // room not configured (VOICE_ROOMS_STRICT)
 	numJoinOutcomes
 )
 
-var joinNames = [numJoinOutcomes]string{"ok", "full", "forbidden", "bad_request", "already_in_room"}
+var joinNames = [numJoinOutcomes]string{"ok", "full", "forbidden", "bad_request", "already_in_room", "not_found"}
 
 func (o JoinOutcome) String() string { return joinNames[o] }
 
