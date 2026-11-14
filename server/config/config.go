@@ -56,6 +56,9 @@ type QUICConfig struct {
 type HTTPConfig struct {
 	// Health + metrics. Cluster-internal only.
 	Addr string `default:":8080" env:"HTTP_ADDR"`
+	// Public API (GET /v1/rooms, /healthz), meant to sit behind a TLS
+	// reverse proxy. Never serves /metrics. Empty = off.
+	PublicAddr string `default:":8090" env:"PUBLIC_HTTP_ADDR"`
 }
 
 type AuthConfig struct {
@@ -76,6 +79,12 @@ type RoomConfig struct {
 	// Uplink datagrams per second per sender before dropping (20ms frames = 50/s).
 	MaxDatagramsPerSec int `default:"60" env:"MAX_DATAGRAMS_PER_SEC"`
 	MaxPayload         int `default:"1000" env:"MAX_DATAGRAM_PAYLOAD"`
+	// Configured rooms, in display order: comma-separated `id:Display Name`.
+	// Ids are lowercase [a-z0-9-]{1,32}.
+	Rooms string `default:"general:General" env:"VOICE_ROOMS"`
+	// Only configured rooms can be joined. false = any other name creates an
+	// ad-hoc room (listed after the configured ones).
+	Strict bool `default:"true" env:"VOICE_ROOMS_STRICT"`
 }
 
 func LoadConfig() (Config, error) {

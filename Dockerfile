@@ -18,8 +18,8 @@ COPY --from=builder --chown=nonroot:nonroot /out/quicvoiced .
 ARG VERSION=dev
 ENV VERSION=$VERSION ENV=production
 
-# 7700/udp: QUIC voice. 8080/tcp: health + metrics.
-EXPOSE 7700/udp 8080/tcp
+# 7700/udp: QUIC voice. 8080/tcp: health + metrics (internal). 8090/tcp: public API.
+EXPOSE 7700/udp 8080/tcp 8090/tcp
 USER 65532:65532
 ENTRYPOINT ["./quicvoiced"]
 CMD ["serve"]

@@ -443,6 +443,8 @@ func joinOutcome(err error) metrics.JoinOutcome {
 		return metrics.JoinFull
 	case errors.Is(err, room.ErrForbidden):
 		return metrics.JoinForbidden
+	case errors.Is(err, room.ErrNotFound):
+		return metrics.JoinNotFound
 	default:
 		return metrics.JoinBadRequest
 	}
@@ -454,6 +456,8 @@ func joinErrorCode(err error) controlpb.Error_Code {
 		return controlpb.Error_ROOM_FULL
 	case errors.Is(err, room.ErrForbidden):
 		return controlpb.Error_FORBIDDEN
+	case errors.Is(err, room.ErrNotFound):
+		return controlpb.Error_ROOM_NOT_FOUND
 	default:
 		return controlpb.Error_PROTOCOL
 	}

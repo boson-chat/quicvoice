@@ -2,7 +2,7 @@
 // It joins a room, sends synthetic 20 ms "Opus" frames (random bytes) and
 // reports what it receives from the other participants.
 //
-//	go run ./examples/bot -addr localhost:7700 -insecure -token alice -room test
+//	go run ./examples/bot -addr localhost:7700 -insecure -token alice -room general
 package main
 
 import (
@@ -24,7 +24,7 @@ import (
 func main() {
 	addr := flag.String("addr", "localhost:7700", "voice server host:port")
 	token := flag.String("token", "bot", "auth token (with AUTH_INSECURE, any name)")
-	room := flag.String("room", "test", "room to join")
+	room := flag.String("room", "general", "room to join")
 	insecure := flag.Bool("insecure", false, "skip TLS verification")
 	listen := flag.Bool("listen", false, "only receive, don't send audio")
 	frameBytes := flag.Int("frame-bytes", 120, "fake opus payload size (~48 kbps at 120)")

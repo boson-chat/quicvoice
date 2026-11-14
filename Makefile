@@ -19,9 +19,9 @@ vet:
 run:
 	AUTH_INSECURE=true go run ./server/cmd serve
 
-# Test client: make bot name=alice room=test
+# Test client: make bot name=alice room=general
 name ?= bot
-room ?= test
+room ?= general
 addr ?= localhost:7700
 bot:
 	go run ./examples/bot -insecure -addr $(addr) -token $(name) -room $(room)

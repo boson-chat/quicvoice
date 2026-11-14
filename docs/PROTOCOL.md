@@ -35,6 +35,13 @@ S → C  RoomState{your session_id, participants[]}
 The `token` is a short-lived JWT issued by the app backend. It carries user
 id, display name, allowed room(s) and permissions (speak, moderate).
 
+`Join{room}` takes a room id. Rooms are configured on the server
+(`VOICE_ROOMS`); with `VOICE_ROOMS_STRICT` on (the default) an unknown id
+gets `Error{code: ROOM_NOT_FOUND}`, and a room the token's `rooms` claim
+excludes gets `Error{code: FORBIDDEN}`. Neither is fatal. Clients discover
+rooms and who is in them with `GET https://<voice host>/v1/rooms` (see the
+README) before connecting.
+
 ## Audio datagrams
 
 All multi-byte integers are big-endian. Opus payload follows the header
