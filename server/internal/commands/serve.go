@@ -12,9 +12,13 @@ import (
 	"github.com/boson-chat/quicvoice/server/config"
 	"github.com/boson-chat/quicvoice/server/http"
 	"github.com/boson-chat/quicvoice/server/internal/certs"
+	"github.com/boson-chat/quicvoice/server/internal/db/repositories/voiceroom"
 	"github.com/boson-chat/quicvoice/server/internal/logger"
 	"github.com/boson-chat/quicvoice/server/internal/services/auth"
+	"github.com/boson-chat/quicvoice/server/internal/services/ergo"
 	"github.com/boson-chat/quicvoice/server/internal/services/room"
+	"github.com/boson-chat/quicvoice/server/internal/services/settings"
+	"github.com/boson-chat/quicvoice/server/internal/services/voicechannel"
 	"github.com/boson-chat/quicvoice/server/internal/transport"
 	"github.com/boson-chat/quicvoice/server/metrics"
 	"github.com/spf13/cobra"
@@ -63,9 +67,15 @@ var serveCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("VOICE_ROOMS: %w", err)
 		}
+		channels, err := buildChannels(ctx, cfg, roomDefs, m)
+		if err != nil {
+			return err
+		}
 		roomService := room.NewRoomService(cfg.RoomConfig.MaxParticipants, m,
-			room.WithRooms(roomDefs, cfg.RoomConfig.Strict))
-		l.Info().Int("rooms", len(roomDefs)).Bool("strict", cfg.RoomConfig.Strict).Msg("voice rooms configured")
+			room.WithDirectory(channels, cfg.RoomConfig.Strict), room.WithJoinPolicy(channels))
+		l.Info().Int("static", len(roomDefs)).Int("total", len(channels.Defs())).Bool("strict", cfg.RoomConfig.Strict).
+			Str("store", cfg.ChannelConfig.StorePath).Bool("ergo_api", cfg.ChannelConfig.ErgoAPIURL != "").
+			Bool("auth_settings", cfg.ChannelConfig.AuthInternalURL != "").Msg("voice rooms configured")
 
 		// 2. Transport
 		tlsConf, err := buildTLS(cfg)
@@ -80,7 +90,7 @@ var serveCmd = &cobra.Command{
 			return http.StartServerWithContext(gctx, cfg.HTTPConfig.Addr, cfg.AppConfig.Version, provider.Handler())
 		})
 		if addr := cfg.HTTPConfig.PublicAddr; addr != "" {
-			g.Go(func() error { return http.StartPublicServerWithContext(gctx, addr, authService, roomService) })
+			g.Go(func() error { return http.StartPublicServerWithContext(gctx, addr, authService, roomService, channels) })
 		}
 		return g.Wait()
 	},
@@ -116,6 +126,34 @@ func buildAuth(ctx context.Context, cfg config.Config) (auth.AuthServiceImpl, er
 		return nil, errors.New("set AUTH_JWKS_URL and/or JWT_SECRET, or AUTH_INSECURE=true for testing")
 	}
 	return comp, nil
+}
+
+func buildChannels(ctx context.Context, cfg config.Config, static []room.Def, m *metrics.Metrics) (*voicechannel.VoiceChannelService, error) {
+	c := cfg.ChannelConfig
+	fallback, err := settings.ParseVoiceCreation(c.CreationFallback)
+	if err != nil {
+		return nil, fmt.Errorf("VOICE_CHANNEL_CREATION: %w", err)
+	}
+	if c.ErgoAPIURL != "" && c.ErgoAPIToken == "" {
+		// e.g. a stack without the irc profile: run without IRC roles.
+		logger.FromCtx(ctx).Warn().Msg("ERGO_API_URL is set but ERGO_API_TOKEN is empty: IRC founder/role lookups are off")
+		c.ErgoAPIURL = ""
+	}
+	repo, err := voiceroom.NewRoomRepository(c.StorePath)
+	if err != nil {
+		return nil, fmt.Errorf("VOICE_ROOMS_DB: %w", err)
+	}
+	return voicechannel.NewVoiceChannelService(ctx, voicechannel.Options{
+		Repo: repo,
+		Settings: settings.NewSettingsService(settings.Options{
+			URL: c.AuthInternalURL, Token: c.InternalAPIToken, Fallback: fallback, TTL: c.SettingsTTL,
+		}),
+		Ergo:       ergo.NewErgoService(ergo.Options{URL: c.ErgoAPIURL, Token: c.ErgoAPIToken, TTL: c.ErgoCacheTTL}),
+		Metrics:    m,
+		Static:     static,
+		MaxPerUser: c.MaxPerUser,
+		MaxRooms:   c.MaxRooms,
+	})
 }
 
 func buildTLS(cfg config.Config) (*tls.Config, error) {

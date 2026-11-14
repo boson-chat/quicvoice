@@ -71,10 +71,11 @@ type LeaveReason uint8
 const (
 	LeaveRequested    LeaveReason = iota // client sent Leave
 	LeaveDisconnected                    // connection ended while in the room
+	LeaveKicked                          // removed by the server (room deleted)
 	numLeaveReasons
 )
 
-var leaveNames = [numLeaveReasons]string{"left", "disconnected"}
+var leaveNames = [numLeaveReasons]string{"left", "disconnected", "kicked"}
 
 func (r LeaveReason) String() string { return leaveNames[r] }
 
@@ -111,6 +112,42 @@ const (
 var controlNames = [numControlTypes]string{"hello", "join", "leave", "set_mute", "ping", "unsupported"}
 
 func (t ControlType) String() string { return controlNames[t] }
+
+// RoomOp is a change to the voice room registry.
+type RoomOp uint8
+
+const (
+	RoomCreate RoomOp = iota
+	RoomUpdate
+	RoomDelete
+	numRoomOps
+)
+
+var roomOpNames = [numRoomOps]string{"create", "update", "delete"}
+
+func (o RoomOp) String() string { return roomOpNames[o] }
+
+// RoomChangeOutcome is how a registry change request ended.
+type RoomChangeOutcome uint8
+
+const (
+	RoomChangeOK          RoomChangeOutcome = iota
+	RoomChangeForbidden                     // policy / role check said no
+	RoomChangeInvalid                       // bad name, parent, role…
+	RoomChangeConflict                      // name taken under that parent
+	RoomChangeNotFound                      // no such room
+	RoomChangeLimit                         // per-user or total room limit
+	RoomChangeUnavailable                   // Ergo needed but unreachable
+	RoomChangeError                         // storage failure
+	numRoomChangeOutcomes
+)
+
+var roomChangeNames = [numRoomChangeOutcomes]string{"ok", "forbidden", "invalid", "conflict", "not_found", "limit", "unavailable", "error"}
+
+func (o RoomChangeOutcome) String() string { return roomChangeNames[o] }
+
+// DefinedRooms is the size of the room registry.
+type DefinedRooms struct{ Static, Dynamic int64 }
 
 // DatagramKind is the kind nibble of a received datagram, bucketed.
 type DatagramKind uint8
@@ -220,6 +257,7 @@ type Metrics struct {
 	quicPackets       metric.Int64Counter
 	quicPacketsLost   metric.Int64Counter
 	quicIO            metric.Int64Counter
+	roomChanges       metric.Int64Counter
 
 	handshakeAttrs  [numHandshakeOutcomes]metric.MeasurementOption
 	joinAttrs       [numJoinOutcomes]metric.MeasurementOption
@@ -227,10 +265,14 @@ type Metrics struct {
 	disconnectAttrs [numDisconnectReasons]metric.MeasurementOption
 	controlAttrs    [numControlTypes]metric.MeasurementOption
 	roleAttrs       [numRoles]metric.MeasurementOption
+	roomChangeAttrs [numRoomOps][numRoomChangeOutcomes]metric.MeasurementOption
+	kindStatic      metric.MeasurementOption
+	kindDynamic     metric.MeasurementOption
 	dirTx, dirRx    metric.MeasurementOption
 
 	clientVersions *clientVersions
 	roomStats      atomic.Pointer[func() RoomStats]
+	definedRooms   atomic.Pointer[func() DefinedRooms]
 
 	// Hot-path counters, reported by the observable callback.
 	dgIn         [numDatagramKinds]atomic.Int64
@@ -345,6 +387,9 @@ func (m *Metrics) init() error {
 	m.quicIO, e = mt.Int64Counter("quicvoice.quic.io", metric.WithUnit("By"),
 		metric.WithDescription("QUIC bytes on the wire (excluding UDP/IP headers) on authenticated connections, by direction."))
 	must(e)
+	m.roomChanges, e = mt.Int64Counter("quicvoice.room.changes", metric.WithUnit("{change}"),
+		metric.WithDescription("Voice room create/update/delete requests on the public API, by op and outcome."))
+	must(e)
 
 	// Hot-path observables.
 	dgIn, e := mt.Int64ObservableCounter("quicvoice.datagrams.received", metric.WithUnit("{datagram}"),
@@ -381,6 +426,13 @@ func (m *Metrics) init() error {
 	for i := range numLeaveReasons {
 		m.leaveAttrs[i] = attrOpt(attribute.String("reason", leaveNames[i]))
 	}
+	for op := range numRoomOps {
+		for o := range numRoomChangeOutcomes {
+			m.roomChangeAttrs[op][o] = attrOpt(attribute.String("op", roomOpNames[op]), attribute.String("outcome", roomChangeNames[o]))
+		}
+	}
+	m.kindStatic = attrOpt(attribute.String("kind", "static"))
+	m.kindDynamic = attrOpt(attribute.String("kind", "dynamic"))
 	for i := range numDisconnectReasons {
 		m.disconnectAttrs[i] = attrOpt(attribute.String("reason", disconnectNames[i]))
 	}
@@ -418,6 +470,11 @@ func (m *Metrics) init() error {
 	}
 	for _, o := range m.controlAttrs {
 		m.controlMessages.Add(bg, 0, o)
+	}
+	for op := range numRoomOps {
+		for _, o := range []RoomChangeOutcome{RoomChangeOK, RoomChangeForbidden} {
+			m.roomChanges.Add(bg, 0, m.roomChangeAttrs[op][o])
+		}
 	}
 	for _, o := range []metric.MeasurementOption{m.dirTx, m.dirRx} {
 		m.quicPackets.Add(bg, 0, o)
@@ -472,7 +529,34 @@ func (m *Metrics) init() error {
 		o.ObserveInt64(maxSize, s.MaxRoomSize)
 		return nil
 	}, rooms, parts, maxSize)
+	if err != nil {
+		return err
+	}
+
+	defined, e := mt.Int64ObservableGauge("quicvoice.rooms.defined", metric.WithUnit("{room}"),
+		metric.WithDescription("Rooms in the registry, by kind (static = VOICE_ROOMS, dynamic = created via the API)."))
+	if e != nil {
+		return e
+	}
+	_, err = mt.RegisterCallback(func(_ context.Context, o metric.Observer) error {
+		fn := m.definedRooms.Load()
+		if fn == nil {
+			return nil
+		}
+		d := (*fn)()
+		o.ObserveInt64(defined, d.Static, m.kindStatic)
+		o.ObserveInt64(defined, d.Dynamic, m.kindDynamic)
+		return nil
+	}, defined)
 	return err
+}
+
+// ObserveDefinedRooms sets the function quicvoice.rooms.defined is read from.
+func (m *Metrics) ObserveDefinedRooms(fn func() DefinedRooms) { m.definedRooms.Store(&fn) }
+
+// RoomChange counts one registry change request.
+func (m *Metrics) RoomChange(ctx context.Context, op RoomOp, o RoomChangeOutcome) {
+	m.roomChanges.Add(ctx, 1, m.roomChangeAttrs[op][o])
 }
 
 // ObserveRooms sets the function quicvoice.rooms, quicvoice.participants and

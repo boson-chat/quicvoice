@@ -56,9 +56,15 @@ type Member struct {
 	// lastVoice is when the member last had a voiced frame forwarded
 	// (UnixNano, 0 = never). Written on the audio hot path, read by List.
 	lastVoice atomic.Int64
+	// closed: removed by the server (room deleted). The session still holds
+	// the pointer until its next Join/Leave; Forward drops its audio.
+	closed atomic.Bool
 }
 
 func (m *Member) Room() string { return m.room.name }
+
+// Closed reports whether the server removed m from its room (CloseRoom).
+func (m *Member) Closed() bool { return m.closed.Load() }
 
 func (m *Member) participant() *controlpb.Participant {
 	return &controlpb.Participant{
@@ -105,12 +111,33 @@ type ParticipantInfo struct {
 	Speaking bool
 }
 
+// Directory is the registry of defined rooms (static VOICE_ROOMS plus
+// dynamic ones). It must be safe for concurrent use.
+type Directory interface {
+	// Defs lists defined rooms in display order.
+	Defs() []Def
+	// Has reports whether id is a defined room.
+	Has(id string) bool
+}
+
+// JoinPolicy decides room-level locks (IRC roles) at Join. canSpeak=false
+// makes the member a listener in that room. Errors should wrap ErrForbidden
+// or ErrNotFound.
+type JoinPolicy interface {
+	AuthorizeJoin(ctx context.Context, room string, id *auth.Identity) (canSpeak bool, err error)
+}
+
 type RoomServiceImpl interface {
 	Join(ctx context.Context, room string, id *auth.Identity, p Peer) (*Member, *controlpb.RoomState, error)
-	// List returns the rooms id may join: configured rooms in config order,
+	// List returns the rooms id may join: defined rooms in directory order,
 	// then (when not strict) live ad-hoc rooms by name. It never blocks the
 	// audio path.
 	List(ctx context.Context, id *auth.Identity) []Info
+	// Participants lists the members of room (empty when nobody is in it).
+	Participants(room string) []ParticipantInfo
+	// CloseRoom removes everyone from room, sending each an Error{KICKED,
+	// reason}. Returns how many were removed.
+	CloseRoom(ctx context.Context, room, reason string) int
 	Leave(ctx context.Context, m *Member, reason string)
 	SetMute(ctx context.Context, m *Member, muted, deafened bool)
 	// Forward fans a raw uplink datagram out to the rest of m's room. It is
@@ -122,12 +149,11 @@ type RoomServiceImpl interface {
 type RoomService struct {
 	maxParticipants int
 	metrics         *metrics.Metrics
-	// defs are the configured rooms, in display order. Read-only after
-	// construction.
-	defs    []Def
-	defined map[string]bool
-	// strict: only configured rooms can be joined.
+	// dir holds the defined rooms; nil = every room is ad-hoc.
+	dir Directory
+	// strict: only defined rooms can be joined.
 	strict bool
+	policy JoinPolicy
 	now    func() time.Time
 
 	mu    sync.Mutex
@@ -140,15 +166,38 @@ type Option func(*RoomService)
 // room with ErrNotFound; without it, other names still create ad-hoc rooms.
 // Without this option every room is ad-hoc.
 func WithRooms(defs []Def, strict bool) Option {
-	return func(s *RoomService) {
-		s.defs = slices.Clone(defs)
-		s.strict = strict
-		s.defined = make(map[string]bool, len(defs))
-		for _, d := range defs {
-			s.defined[d.ID] = true
-		}
-	}
+	return WithDirectory(NewStaticDirectory(defs), strict)
 }
+
+// WithDirectory sets where defined rooms come from (e.g. the dynamic room
+// registry). strict as for WithRooms.
+func WithDirectory(d Directory, strict bool) Option {
+	return func(s *RoomService) { s.dir, s.strict = d, strict }
+}
+
+// WithJoinPolicy adds room-level join checks (IRC role locks).
+func WithJoinPolicy(p JoinPolicy) Option {
+	return func(s *RoomService) { s.policy = p }
+}
+
+type staticDirectory struct {
+	defs []Def
+	has  map[string]bool
+}
+
+// NewStaticDirectory is a fixed Directory.
+func NewStaticDirectory(defs []Def) Directory {
+	d := &staticDirectory{defs: slices.Clone(defs), has: make(map[string]bool, len(defs))}
+	for _, x := range defs {
+		d.has[x.ID] = true
+	}
+	return d
+}
+
+func (d *staticDirectory) Defs() []Def        { return d.defs }
+func (d *staticDirectory) Has(id string) bool { return d.has[id] }
+
+func (s *RoomService) defined(id string) bool { return s.dir != nil && s.dir.Has(id) }
 
 // WithClock replaces time.Now (tests).
 func WithClock(now func() time.Time) Option {
@@ -172,8 +221,12 @@ func (s *RoomService) List(_ context.Context, id *auth.Identity) []Info {
 	s.mu.Unlock()
 
 	now := s.now().UnixNano()
-	out := make([]Info, 0, len(s.defs))
-	for _, d := range s.defs {
+	var defs []Def
+	if s.dir != nil {
+		defs = s.dir.Defs()
+	}
+	out := make([]Info, 0, len(defs))
+	for _, d := range defs {
 		if id.CanJoin(d.ID) {
 			out = append(out, Info{ID: d.ID, Name: d.Name, Participants: live[d.ID].participants(now)})
 		}
@@ -183,7 +236,7 @@ func (s *RoomService) List(_ context.Context, id *auth.Identity) []Info {
 	}
 	var adhoc []string
 	for name := range live {
-		if !s.defined[name] && id.CanJoin(name) {
+		if !s.defined(name) && id.CanJoin(name) {
 			adhoc = append(adhoc, name)
 		}
 	}
@@ -192,6 +245,42 @@ func (s *RoomService) List(_ context.Context, id *auth.Identity) []Info {
 		out = append(out, Info{ID: name, Name: name, Participants: live[name].participants(now)})
 	}
 	return out
+}
+
+func (s *RoomService) Participants(name string) []ParticipantInfo {
+	s.mu.Lock()
+	r := s.rooms[name]
+	s.mu.Unlock()
+	return r.participants(s.now().UnixNano())
+}
+
+func (s *RoomService) CloseRoom(ctx context.Context, name, reason string) int {
+	s.mu.Lock()
+	r, ok := s.rooms[name]
+	if !ok {
+		s.mu.Unlock()
+		return 0
+	}
+	r.mu.Lock()
+	kicked := make([]*Member, 0, len(r.members))
+	for _, m := range r.members {
+		m.closed.Store(true)
+		kicked = append(kicked, m)
+	}
+	clear(r.members)
+	r.rebuildSnapshot()
+	r.mu.Unlock()
+	delete(s.rooms, name)
+	s.mu.Unlock()
+
+	msg := &controlpb.ControlMessage{Msg: &controlpb.ControlMessage_Error{Error: &controlpb.Error{
+		Code: controlpb.Error_KICKED, Message: reason,
+	}}}
+	for _, m := range kicked {
+		_ = m.peer.SendControl(msg)
+		s.metrics.Leave(ctx, metrics.LeaveKicked)
+	}
+	return len(kicked)
 }
 
 // participants lists r's members by session id. nil r = no members.
@@ -243,15 +332,27 @@ func (s *RoomService) stats() metrics.RoomStats {
 	return st
 }
 
-func (s *RoomService) Join(_ context.Context, name string, id *auth.Identity, p Peer) (*Member, *controlpb.RoomState, error) {
+func (s *RoomService) Join(ctx context.Context, name string, id *auth.Identity, p Peer) (*Member, *controlpb.RoomState, error) {
 	if name == "" {
 		return nil, nil, ErrEmptyRoom
 	}
-	if s.strict && !s.defined[name] {
+	if s.strict && !s.defined(name) {
 		return nil, nil, ErrNotFound
 	}
 	if !id.CanJoin(name) {
 		return nil, nil, ErrForbidden
+	}
+	if s.policy != nil && s.defined(name) {
+		canSpeak, err := s.policy.AuthorizeJoin(ctx, name, id)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !canSpeak && id.Role > controlpb.Role_LISTENER {
+			// Listener in this room only; the session keeps its identity.
+			cp := *id
+			cp.Role = controlpb.Role_LISTENER
+			id = &cp
+		}
 	}
 
 	s.mu.Lock()
@@ -335,6 +436,10 @@ func (s *RoomService) Forward(m *Member, uplink []byte) {
 	mt := s.metrics
 	if len(uplink) < wire.UplinkHeaderLen {
 		mt.Drop(metrics.DropMalformed)
+		return
+	}
+	if m.closed.Load() {
+		mt.Drop(metrics.DropNotInRoom)
 		return
 	}
 	if !m.Identity.CanSpeak() || m.serverMuted.Load() || m.selfMuted.Load() {

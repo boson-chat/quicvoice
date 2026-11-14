@@ -12,6 +12,7 @@ import (
 	"github.com/boson-chat/quicvoice/server/internal/logger"
 	"github.com/boson-chat/quicvoice/server/internal/services/auth"
 	"github.com/boson-chat/quicvoice/server/internal/services/room"
+	"github.com/boson-chat/quicvoice/server/internal/services/voicechannel"
 )
 
 // NewRouter serves /healthz, /version and, on /metrics, metricsHandler (the
@@ -26,12 +27,16 @@ func NewRouter(version string, metricsHandler nethttp.Handler) nethttp.Handler {
 	return mux
 }
 
-// NewPublicRouter serves the public API: GET /v1/rooms and GET /healthz.
-func NewPublicRouter(a auth.AuthServiceImpl, r room.RoomServiceImpl) nethttp.Handler {
-	rooms := &handlers.RoomsHandler{Auth: a, Rooms: r}
+// NewPublicRouter serves the public API: the voice room list and registry
+// (GET/POST /v1/rooms, PATCH/DELETE /v1/rooms/{id}) and GET /healthz.
+func NewPublicRouter(a auth.AuthServiceImpl, r room.RoomServiceImpl, vc voicechannel.VoiceChannelServiceImpl) nethttp.Handler {
+	rooms := &handlers.RoomsHandler{Auth: a, Rooms: r, Channels: vc}
 	mux := nethttp.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthz)
 	mux.HandleFunc("GET /v1/rooms", rooms.List)
+	mux.HandleFunc("POST /v1/rooms", rooms.Create)
+	mux.HandleFunc("PATCH /v1/rooms/{id}", rooms.Update)
+	mux.HandleFunc("DELETE /v1/rooms/{id}", rooms.Delete)
 	return mux
 }
 
@@ -47,10 +52,10 @@ func StartServerWithContext(ctx context.Context, addr, version string, metricsHa
 }
 
 // StartPublicServerWithContext serves the public router until ctx is cancelled.
-func StartPublicServerWithContext(ctx context.Context, addr string, a auth.AuthServiceImpl, r room.RoomServiceImpl) error {
+func StartPublicServerWithContext(ctx context.Context, addr string, a auth.AuthServiceImpl, r room.RoomServiceImpl, vc voicechannel.VoiceChannelServiceImpl) error {
 	return serve(ctx, "public HTTP", &nethttp.Server{
 		Addr:              addr,
-		Handler:           NewPublicRouter(a, r),
+		Handler:           NewPublicRouter(a, r, vc),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
