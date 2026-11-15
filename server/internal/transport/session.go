@@ -206,6 +206,9 @@ func (s *session) handleControl(ctx context.Context, m *controlpb.ControlMessage
 			Pong: &controlpb.Pong{Id: msg.Ping.GetId()},
 		}})
 
+	case *controlpb.ControlMessage_VideoTicketRequest:
+		s.videoTicket(ctx)
+
 	case *controlpb.ControlMessage_Hello:
 		mt.ControlMessage(ctx, metrics.ControlHello)
 		s.sendError(controlpb.Error_PROTOCOL, "duplicate Hello", false)
@@ -216,6 +219,31 @@ func (s *session) handleControl(ctx context.Context, m *controlpb.ControlMessage
 		mt.ControlMessage(ctx, metrics.ControlUnsupported)
 	}
 	return nil
+}
+
+// videoTicket answers a VideoTicketRequest: a ticket for the video room of
+// the voice channel this session is in.
+func (s *session) videoTicket(ctx context.Context) {
+	vc := s.srv.cfg.VideoConfig
+	if s.srv.tickets == nil || vc.QUICURL == "" {
+		s.sendError(controlpb.Error_FORBIDDEN, "video isn't enabled on this network", false)
+		return
+	}
+	mem := s.member.Load()
+	if mem == nil || mem.Closed() {
+		s.sendError(controlpb.Error_FORBIDDEN, "join a voice channel first", false)
+		return
+	}
+	id := s.identity
+	tok, exp, err := s.srv.tickets.Issue(id.UserID, id.DisplayName, mem.Room(), id.CanSpeak())
+	if err != nil {
+		logger.FromCtx(ctx).Warn().Err(err).Msg("video ticket")
+		s.sendError(controlpb.Error_UNKNOWN, "couldn't issue a video ticket", false)
+		return
+	}
+	_ = s.SendControl(&controlpb.ControlMessage{Msg: &controlpb.ControlMessage_VideoTicket{VideoTicket: &controlpb.VideoTicket{
+		Token: tok, ExpiresAt: exp.Unix(), QuicUrl: vc.QUICURL, WebtransportUrl: vc.WebTransportURL, Room: mem.Room(),
+	}}})
 }
 
 func (s *session) leave(ctx context.Context, reason metrics.LeaveReason) {

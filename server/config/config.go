@@ -15,6 +15,8 @@ type Config struct {
 	RoomConfig RoomConfig
 	// Dynamic voice rooms: auth settings + Ergo role lookups.
 	ChannelConfig ChannelConfig
+	// Video for voice channels (quicvideod): tickets + the control link.
+	VideoConfig VideoConfig
 
 	TelemetryConfig TelemetryConfig
 }
@@ -57,6 +59,23 @@ type QUICConfig struct {
 	KeepAlive      time.Duration `default:"10s" env:"QUIC_KEEPALIVE"`
 	// How long a new connection has to send Hello.
 	HelloTimeout time.Duration `default:"5s" env:"HELLO_TIMEOUT"`
+}
+
+// VideoConfig turns on video in voice channels (docs: quicvideo
+// docs/voice-merge.md). Without VIDEO_QUIC_URL, ticket requests get an error.
+type VideoConfig struct {
+	// Where clients reach quicvideod: native (host:port) and browsers.
+	QUICURL         string `env:"VIDEO_QUIC_URL"`
+	WebTransportURL string `env:"VIDEO_WEBTRANSPORT_URL"`
+	// Ed25519 key for tickets (PEM seed; created on first start). Empty =
+	// in-memory key (dev only: tickets stop verifying after a restart).
+	TicketKeyFile string        `env:"VIDEO_TICKET_KEY_FILE"`
+	TicketIssuer  string        `default:"voice" env:"VIDEO_TICKET_ISSUER"`
+	TicketTTL     time.Duration `default:"5m" env:"VIDEO_TICKET_TTL"`
+	// quicvideod's control listener and its bearer token. Empty = no link
+	// (leaving voice then only stops video when the ticket expires).
+	ControlURL   string `env:"VIDEO_CONTROL_URL"`
+	ControlToken string `env:"VIDEO_CONTROL_TOKEN"`
 }
 
 type HTTPConfig struct {

@@ -30,6 +30,8 @@ S → C  Welcome{codec, server caps}        | Error + close
 C → S  Join{room}
 S → C  RoomState{your session_id, participants[]}
 ...    ParticipantJoined/Left/Updated, SetMute, SetVoiceTarget, Moderate, Ping/Pong
+C → S  VideoTicketRequest{}               (in a channel; see docs/VIDEO.md)
+S → C  VideoTicket{token, quic_url, …}    | Error{FORBIDDEN}
 ```
 
 The `token` is a short-lived JWT issued by the app backend. It carries user

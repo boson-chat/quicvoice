@@ -19,6 +19,7 @@ import (
 	"github.com/boson-chat/quicvoice/server/internal/db/repositories/voiceroom"
 	"github.com/boson-chat/quicvoice/server/internal/services/auth"
 	"github.com/boson-chat/quicvoice/server/internal/services/room"
+	"github.com/boson-chat/quicvoice/server/internal/services/videoticket"
 	"github.com/boson-chat/quicvoice/server/internal/services/voicechannel"
 	"github.com/boson-chat/quicvoice/server/internal/transport"
 	"github.com/boson-chat/quicvoice/server/metrics"
@@ -60,6 +61,8 @@ type serverSetup struct {
 	// auth: token verifier for QUIC and the public API. nil = insecure
 	// (the token is the user name).
 	auth auth.AuthServiceImpl
+	// tickets: video tickets on (VIDEO_QUIC_URL set, JWKS served).
+	tickets *videoticket.VideoTicketService
 }
 
 func startServerWith(t *testing.T, setup serverSetup) testServer {
@@ -71,6 +74,10 @@ func startServerWith(t *testing.T, setup serverSetup) testServer {
 	}
 	cfg.QUICConfig.Addr = freeUDPAddr(t)
 	cfg.TelemetryConfig.QUICStatsInterval = 50 * time.Millisecond
+	if setup.tickets != nil {
+		cfg.VideoConfig.QUICURL = "quic://video.test:7710"
+		cfg.VideoConfig.WebTransportURL = "https://video.test:7710/wt"
+	}
 	cert, err := certs.SelfSigned("localhost")
 	if err != nil {
 		t.Fatal(err)
@@ -110,10 +117,17 @@ func startServerWith(t *testing.T, setup serverSetup) testServer {
 		opts = append(opts, room.WithDirectory(vc, true), room.WithJoinPolicy(vc))
 	}
 	rooms := room.NewRoomService(10, m, opts...)
-	publicSrv := httptest.NewServer(qvhttp.NewPublicRouter(authService, rooms, vc))
+	var tickets videoticket.VideoTicketServiceImpl
+	if setup.tickets != nil {
+		tickets = setup.tickets
+	}
+	publicSrv := httptest.NewServer(qvhttp.NewPublicRouter(authService, rooms, vc, tickets))
 	t.Cleanup(publicSrv.Close)
 
 	srv := transport.NewServer(cfg, &tls.Config{Certificates: []tls.Certificate{cert}}, authService, rooms, m)
+	if tickets != nil {
+		srv.SetVideoTickets(tickets)
+	}
 	go func() { _ = srv.Serve(ctx) }()
 	time.Sleep(100 * time.Millisecond)
 	return testServer{addr: cfg.QUICConfig.Addr, metricsURL: httpSrv.URL + "/metrics", publicURL: publicSrv.URL}
