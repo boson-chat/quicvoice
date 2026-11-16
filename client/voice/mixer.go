@@ -15,6 +15,11 @@ type stream struct {
 
 	lastVoice time.Time // last frame with the sender's VAD bit set
 	level     uint8     // last reported level, -dBov
+
+	// Lip sync: the audio timestamp of this sender's frame in m.frame
+	// (curOK: it contributed to the current frame).
+	curTS uint32
+	curOK bool
 }
 
 // mixer pulls one frame from every stream, applies per-user and master gain
@@ -35,6 +40,13 @@ type mixer struct {
 	pos   int
 	acc   []float32
 	tmp   []int16
+
+	// Lip sync, under mu: the last callback's wall clock and how far into
+	// m.frame it started reading, and the output latency to add.
+	cbUS      int64
+	cbPos     int
+	cbSamples int   // that callback's length
+	latencyUS int64 // 0 = one callback's worth
 }
 
 func newMixer(newDecoder func() (frameDecoder, error), target int) *mixer {
@@ -94,6 +106,13 @@ func (m *mixer) setGain(sessionID uint16, gain float32) {
 
 // read fills dst with mixed playback audio. Called from the audio callback.
 func (m *mixer) read(dst []int16) {
+	if m.pos == len(m.frame) {
+		m.mixFrame()
+		m.pos = 0
+	}
+	m.mu.Lock()
+	m.cbUS, m.cbPos, m.cbSamples = time.Now().UnixMicro(), m.pos, len(dst)
+	m.mu.Unlock()
 	for len(dst) > 0 {
 		if m.pos == len(m.frame) {
 			m.mixFrame()
@@ -112,9 +131,11 @@ func (m *mixer) mixFrame() {
 	master, deafened := m.master, m.deafened
 	// Pop every stream even when deafened so buffers keep draining.
 	for _, s := range m.streams {
+		s.curOK = false
 		if !s.jb.pop(m.tmp) {
 			continue
 		}
+		s.curTS, s.curOK = s.jb.poppedTS()
 		g := s.gain / 32768
 		for i, v := range m.tmp {
 			m.acc[i] += float32(v) * g
@@ -129,6 +150,24 @@ func (m *mixer) mixFrame() {
 	for i, v := range m.acc {
 		m.frame[i] = int16(softLimit(v*master) * 32767)
 	}
+}
+
+// playout says which of a sender's audio timestamps reaches the speaker
+// when: the sample at the start of the last playback callback, at that
+// callback's time plus the output latency. false while the sender is
+// silent (nothing of theirs is playing).
+func (m *mixer) playout(sessionID uint16) (ts uint32, localUS int64, ok bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s := m.streams[sessionID]
+	if s == nil || !s.curOK || m.cbUS == 0 {
+		return 0, 0, false
+	}
+	lat := m.latencyUS
+	if lat == 0 {
+		lat = int64(m.cbSamples) * 1_000_000 / SampleRate
+	}
+	return s.curTS + uint32(m.cbPos), m.cbUS + lat, true
 }
 
 // softLimit is linear up to 0.8 and bends smoothly towards ±1 above it, so

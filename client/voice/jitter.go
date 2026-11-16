@@ -31,6 +31,7 @@ type slot struct {
 	valid   bool
 	seq     uint16
 	flags   uint8
+	ts      uint32 // audio timestamp (48 kHz)
 	payload []byte
 }
 
@@ -57,6 +58,10 @@ type jitterBuffer struct {
 	next      uint16 // seq of the next frame to play
 	concealed int    // consecutive concealed frames
 	stats     JitterStats
+
+	// The audio timestamp of the frame the last pop produced (lip sync).
+	popTS    uint32
+	popTSSet bool
 }
 
 func newJitterBuffer(dec frameDecoder, target int) *jitterBuffer {
@@ -98,7 +103,7 @@ func (j *jitterBuffer) push(d wire.Downlink) {
 	}
 
 	s := &j.ring[d.Seq%ringSize]
-	s.valid, s.seq, s.flags = true, d.Seq, d.Flags
+	s.valid, s.seq, s.flags, s.ts = true, d.Seq, d.Flags, d.Timestamp
 	s.payload = append(s.payload[:0], d.Payload...)
 	j.stats.Received++
 }
@@ -131,6 +136,7 @@ func (j *jitterBuffer) pop(pcm []int16) bool {
 
 	played := true
 	if s := j.slotFor(j.next); s != nil {
+		j.popTS, j.popTSSet = s.ts, true
 		_, err := j.dec.Decode(s.payload, pcm)
 		s.valid = false
 		j.concealed = 0
@@ -144,7 +150,11 @@ func (j *jitterBuffer) pop(pcm []int16) bool {
 		}
 	} else {
 		// Missing: recover it from the next frame's in-band FEC if we have
-		// that, otherwise let Opus extrapolate (PLC).
+		// that, otherwise let Opus extrapolate (PLC). It stands in for the
+		// frame 20 ms after the last one.
+		if j.popTSSet {
+			j.popTS += FrameSamples
+		}
 		if nxt := j.slotFor(j.next + 1); nxt != nil {
 			if err := j.dec.DecodeFEC(nxt.payload, pcm); err != nil {
 				_ = j.dec.DecodePLC(pcm)
@@ -161,6 +171,14 @@ func (j *jitterBuffer) pop(pcm []int16) bool {
 	}
 	j.next++
 	return played
+}
+
+// poppedTS is the audio timestamp of the frame the last pop produced
+// (the mixer asks right after pop; lock order mixer.mu → jb.mu).
+func (j *jitterBuffer) poppedTS() (uint32, bool) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.popTS, j.popTSSet
 }
 
 func (j *jitterBuffer) slotFor(seq uint16) *slot {
