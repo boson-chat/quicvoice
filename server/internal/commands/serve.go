@@ -119,6 +119,14 @@ var serveCmd = &cobra.Command{
 		}
 
 		// 2. Transport
+		if q := cfg.QUICConfig; q.CertFile != "" {
+			err := certs.WaitForFiles(ctx, q.CertFile, q.KeyFile, 2*time.Second, func(reason error) {
+				l.Warn().Err(reason).Str("cert", q.CertFile).Msg("waiting for the TLS certificate files (certsync exports them once the certificate exists)")
+			})
+			if err != nil {
+				return err
+			}
+		}
 		tlsConf, err := buildTLS(cfg)
 		if err != nil {
 			return err
