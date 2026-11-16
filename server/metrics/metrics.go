@@ -105,11 +105,12 @@ const (
 	ControlLeave
 	ControlSetMute
 	ControlPing
+	ControlAudioClock
 	ControlUnsupported // known-but-unimplemented or future messages
 	numControlTypes
 )
 
-var controlNames = [numControlTypes]string{"hello", "join", "leave", "set_mute", "ping", "unsupported"}
+var controlNames = [numControlTypes]string{"hello", "join", "leave", "set_mute", "ping", "audio_clock", "unsupported"}
 
 func (t ControlType) String() string { return controlNames[t] }
 

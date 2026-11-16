@@ -28,6 +28,24 @@ type Sender interface {
 	SendAudio(u *wire.Uplink) error
 }
 
+// ClockSender is a Sender that can also carry lip-sync reports (the
+// quicvoice client does). The engine sends one when a talk spurt starts
+// and about once a second while transmitting; the audio itself is
+// unchanged.
+type ClockSender interface {
+	SendAudioClock(ts uint32, captureUS int64) error
+}
+
+// clockReportEvery is how often a lip-sync report is sent while talking.
+const clockReportEvery = time.Second
+
+// capFrame is one 20 ms frame and the wall clock (Unix µs) of its first
+// sample.
+type capFrame struct {
+	pcm []int16
+	us  int64
+}
+
 // Mode decides when the mic transmits.
 type Mode int
 
@@ -83,7 +101,7 @@ type Engine struct {
 
 	// Capture state, owned by the capture goroutine.
 	capBuf  []int16
-	frames  chan []int16
+	frames  chan capFrame
 	stop    chan struct{}
 	stopped sync.WaitGroup
 
@@ -113,7 +131,7 @@ func NewEngine(opts Options) (*Engine, error) {
 		opts:   opts,
 		enc:    enc,
 		capBuf: make([]int16, 0, FrameSamples),
-		frames: make(chan []int16, 8),
+		frames: make(chan capFrame, 8),
 		stop:   make(chan struct{}),
 		mix: newMixer(func() (frameDecoder, error) {
 			return opus.NewDecoder(SampleRate, 1)
@@ -182,7 +200,12 @@ func (e *Engine) Stats() Stats {
 
 // Capture takes mic samples in any chunk size. Called from the audio
 // callback: it only copies, encoding happens on its own goroutine.
-func (e *Engine) Capture(pcm []int16) {
+func (e *Engine) Capture(pcm []int16) { e.captureAt(pcm, time.Now().UnixMicro()) }
+
+// captureAt is Capture with the callback's wall clock: the chunk's last
+// sample was captured at nowUS, so a frame's first sample was captured
+// (samples from it to the chunk's end) earlier.
+func (e *Engine) captureAt(pcm []int16, nowUS int64) {
 	for len(pcm) > 0 {
 		n := min(FrameSamples-len(e.capBuf), len(pcm))
 		e.capBuf = append(e.capBuf, pcm[:n]...)
@@ -191,8 +214,9 @@ func (e *Engine) Capture(pcm []int16) {
 			frame := make([]int16, FrameSamples)
 			copy(frame, e.capBuf)
 			e.capBuf = e.capBuf[:0]
+			startUS := nowUS - int64(FrameSamples+len(pcm))*1_000_000/SampleRate
 			select {
-			case e.frames <- frame:
+			case e.frames <- capFrame{pcm: frame, us: startUS}:
 			default: // encoder behind; drop rather than block the callback
 			}
 		}
@@ -213,14 +237,16 @@ func (e *Engine) encodeLoop() {
 		sending bool
 		hang    int
 		out     = make([]byte, maxOpusFrame)
+		lastRep time.Time
 	)
 	for {
-		var frame []int16
+		var cf capFrame
 		select {
 		case <-e.stop:
 			return
-		case frame = <-e.frames:
+		case cf = <-e.frames:
 		}
+		frame := cf.pcm
 
 		level := rmsUnit(frame)
 		e.micLevel.Store(math.Float32bits(level))
@@ -272,6 +298,13 @@ func (e *Engine) encodeLoop() {
 		if b := e.sender.Load(); b != nil {
 			if err := b.s.SendAudio(u); err == nil {
 				e.framesSent.Add(1)
+			}
+			// Lip sync: this frame's timestamp ↔ its capture wall clock, at
+			// a spurt start and then about once a second.
+			if cs, ok := b.s.(ClockSender); ok && (flags == wire.FlagStart || time.Since(lastRep) >= clockReportEvery) {
+				if cs.SendAudioClock(ts, cf.us) == nil {
+					lastRep = time.Now()
+				}
 			}
 		}
 		if e.loopback.Load() {

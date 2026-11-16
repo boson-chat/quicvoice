@@ -36,6 +36,8 @@ type session struct {
 
 	identity *auth.Identity
 	member   atomic.Pointer[room.Member]
+
+	lastClock time.Time // last relayed AudioClock (control goroutine only)
 }
 
 func newSession(srv *Server, conn *quic.Conn) *session {
@@ -193,6 +195,14 @@ func (s *session) handleControl(ctx context.Context, m *controlpb.ControlMessage
 	case *controlpb.ControlMessage_Leave:
 		mt.ControlMessage(ctx, metrics.ControlLeave)
 		s.leave(ctx, metrics.LeaveRequested)
+
+	case *controlpb.ControlMessage_AudioClock:
+		mt.ControlMessage(ctx, metrics.ControlAudioClock)
+		// Relayed as is; at most 4 a second per sender (clients send ~1/s).
+		if mem := s.member.Load(); mem != nil && time.Since(s.lastClock) >= 250*time.Millisecond {
+			s.lastClock = time.Now()
+			s.srv.rooms.RelayAudioClock(mem, msg.AudioClock)
+		}
 
 	case *controlpb.ControlMessage_SetMute:
 		mt.ControlMessage(ctx, metrics.ControlSetMute)
