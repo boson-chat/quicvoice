@@ -3,6 +3,7 @@
 package certs
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -47,6 +48,31 @@ func (s *FileSource) load() (*tls.Certificate, error) {
 	}
 	s.cert, s.modTime = &c, st.ModTime()
 	return s.cert, nil
+}
+
+// WaitForFiles blocks until certFile and keyFile exist and load as a key
+// pair, polling every `every`; wait is called (with the reason) on the
+// first miss and then at most once a minute. On a fresh stack the
+// certificate for a new host only appears once Traefik has it and
+// certsync exported it, so exiting would just put the container into
+// docker's restart backoff.
+func WaitForFiles(ctx context.Context, certFile, keyFile string, every time.Duration, wait func(reason error)) error {
+	var told time.Time
+	for {
+		_, err := tls.LoadX509KeyPair(certFile, keyFile)
+		if err == nil {
+			return nil
+		}
+		if wait != nil && time.Since(told) >= time.Minute {
+			told = time.Now()
+			wait(err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(every):
+		}
+	}
 }
 
 // GetCertificate is for tls.Config. It re-stats the file at most once a minute
