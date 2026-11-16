@@ -143,6 +143,8 @@ type RoomServiceImpl interface {
 	SetMaxParticipants(n int)
 	Leave(ctx context.Context, m *Member, reason string)
 	SetMute(ctx context.Context, m *Member, muted, deafened bool)
+	// RelayAudioClock sends m's lip-sync report to the others in its room.
+	RelayAudioClock(m *Member, c *controlpb.AudioClock)
 	// Snapshot is the current membership: room → user ids (for the video
 	// link's periodic sync).
 	Snapshot() map[string][]string
@@ -492,6 +494,17 @@ func (s *RoomService) SetMute(_ context.Context, m *Member, muted, deafened bool
 	m.room.broadcast(0, &controlpb.ControlMessage{Msg: &controlpb.ControlMessage_ParticipantUpdated{
 		ParticipantUpdated: &controlpb.ParticipantUpdated{Participant: m.participant()},
 	}})
+}
+
+// RelayAudioClock implements RoomServiceImpl: the report goes to everyone
+// else in m's room, stamped with m's session id.
+func (s *RoomService) RelayAudioClock(m *Member, c *controlpb.AudioClock) {
+	if m.closed.Load() {
+		return
+	}
+	m.room.broadcast(m.SessionID, &controlpb.ControlMessage{Msg: &controlpb.ControlMessage_AudioClock{AudioClock: &controlpb.AudioClock{
+		SessionId: uint32(m.SessionID), Timestamp: c.GetTimestamp(), CaptureUs: c.GetCaptureUs(), Version: c.GetVersion(),
+	}}})
 }
 
 func (s *RoomService) Forward(m *Member, uplink []byte) {

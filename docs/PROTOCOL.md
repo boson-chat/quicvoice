@@ -31,6 +31,8 @@ C → S  Join{room}
 S → C  RoomState{your session_id, participants[]}
 ...    ParticipantJoined/Left/Updated, SetMute, SetVoiceTarget, Moderate, Ping/Pong
 C → S  VideoTicketRequest{}               (in a channel; see docs/VIDEO.md)
+C → S  AudioClock{timestamp, capture_us}  (lip sync, below)
+S → C  AudioClock{session_id, …}          (relayed to the rest of the room)
 S → C  VideoTicket{token, quic_url, …}    | Error{FORBIDDEN}
 ```
 
@@ -43,6 +45,21 @@ gets `Error{code: ROOM_NOT_FOUND}`, and a room the token's `rooms` claim
 excludes gets `Error{code: FORBIDDEN}`. Neither is fatal. Clients discover
 rooms and who is in them with `GET https://<voice host>/v1/rooms` (see the
 README) before connecting.
+
+## Lip sync (`AudioClock`)
+
+Audio timestamps (48 kHz, random 32-bit start) say nothing about wall time, and the server never rewrites them. Video from quicvideo carries the sender's capture time in Unix µs. To play one person's audio and video in sync, each sender reports how its audio clock maps to its wall clock, much like an RTCP sender report:
+
+- **Sender.** `AudioClock{timestamp, capture_us, version: 1}`: "the frame with audio timestamp T was captured at Unix µs W".
+  - `W` is the wall clock (`time.Now().UnixMicro()` in Go) when the frame's first sample was captured, which is the same clock quicvideo stamps `capture_ts` with.
+  - The voice engine sends one when a talk spurt starts and about once a second while transmitting (`client/voice`, when its `Sender` is also a `ClockSender`, which `client.Client` is). The audio datagrams are unchanged.
+- **Server.** It relays the report to everyone else in the sender's room with `session_id` set, at most 4 a second per sender (it drops the rest), and only from members of a room.
+- **Receiver.** `client/avsync.Clock` per sender turns any later audio timestamp into the sender's wall time.
+  - It unwraps the timestamp across 2^32 from the random start.
+  - It fits the sender's audio-vs-wall drift over the last 16 reports, clamped to ±1000 ppm.
+  - It starts over when a report is more than 2 s off, which means the sender restarted.
+  - A video frame is due when the audio captured at the same moment plays. No clock sync between machines is needed, because both sides of the mapping are the sender's clocks.
+- **Old peers.** Older clients ignore the message (an unknown `oneof` field). Without reports, play both unsynced.
 
 ## Audio datagrams
 

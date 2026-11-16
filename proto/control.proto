@@ -41,7 +41,25 @@ message ControlMessage {
     // video (quicvideod): a ticket for the voice channel's video room
     VideoTicketRequest video_ticket_request = 70;
     VideoTicket video_ticket = 71;
+
+    // lip sync: a sender's audio clock → wall clock (both directions)
+    AudioClock audio_clock = 72;
   }
+}
+
+// AudioClock is a sender report for lip sync. C → S: maps this client's
+// audio timestamps (the datagrams' 48 kHz timestamp, random start) to its
+// wall clock in Unix µs, which is the clock quicvideo stamps video
+// capture_ts with. S → C: relayed to the others in the room with
+// session_id set. Sent when a talk spurt starts and about once a second
+// while transmitting; the server drops more than 4 a second. Receivers
+// without it (or older clients, which ignore it) play audio and video
+// unsynced.
+message AudioClock {
+  uint32 session_id = 1; // set by the server when relaying
+  uint32 timestamp = 2;  // audio timestamp of a frame (48 kHz samples)
+  int64 capture_us = 3;  // when that frame's first sample was captured, Unix µs
+  uint32 version = 4;    // 1
 }
 
 message Hello {

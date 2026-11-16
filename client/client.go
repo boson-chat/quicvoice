@@ -176,6 +176,14 @@ func (c *Client) Leave() error {
 	return c.send(&controlpb.ControlMessage{Msg: &controlpb.ControlMessage_Leave{Leave: &controlpb.Leave{}}})
 }
 
+// SendAudioClock sends a lip-sync report: the audio timestamp ts was
+// captured at captureUS (Unix µs). The voice engine calls it (ClockSender).
+func (c *Client) SendAudioClock(ts uint32, captureUS int64) error {
+	return c.send(&controlpb.ControlMessage{Msg: &controlpb.ControlMessage_AudioClock{
+		AudioClock: &controlpb.AudioClock{Timestamp: ts, CaptureUs: captureUS, Version: 1},
+	}})
+}
+
 func (c *Client) SetMute(muted, deafened bool) error {
 	return c.send(&controlpb.ControlMessage{Msg: &controlpb.ControlMessage_SetMute{
 		SetMute: &controlpb.SetMute{Muted: muted, Deafened: deafened},
