@@ -37,6 +37,10 @@ message ControlMessage {
 
     Ping ping = 60;
     Pong pong = 61;
+
+    // video (quicvideod): a ticket for the voice channel's video room
+    VideoTicketRequest video_ticket_request = 70;
+    VideoTicket video_ticket = 71;
   }
 }
 
@@ -155,3 +159,19 @@ message Data {
 
 message Ping { uint64 id = 1; }
 message Pong { uint64 id = 1; }
+
+// Client → server: a ticket for this voice channel's video room. Only for a
+// session in a voice channel; otherwise Error{FORBIDDEN}.
+message VideoTicketRequest {}
+
+// Server → client: an EdDSA JWT for quicvideod (aud "quicvideo", rooms =
+// [this voice channel], perms ["video.publish"] unless listener/muted),
+// valid until expires_at. Join the video room named like the voice channel;
+// ask again before expiry and send the new token as quicvideo Refresh.
+message VideoTicket {
+  string token = 1;
+  int64 expires_at = 2;        // Unix seconds
+  string quic_url = 3;         // host:port for native clients (ALPN boson-video/1)
+  string webtransport_url = 4; // https://host:port/wt for browsers
+  string room = 5;             // the video room = the voice channel id
+}

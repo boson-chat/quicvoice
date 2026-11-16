@@ -129,3 +129,58 @@ func TestSessionIDsNotReusedImmediately(t *testing.T) {
 		t.Fatalf("session id reused: %d", b.SessionID)
 	}
 }
+
+type fakeObserver struct {
+	mu     sync.Mutex
+	left   []string
+	closed []string
+}
+
+func (o *fakeObserver) MemberLeft(room, user string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.left = append(o.left, room+"/"+user)
+}
+
+func (o *fakeObserver) RoomClosed(room string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.closed = append(o.closed, room)
+}
+
+func TestObserverAndSnapshot(t *testing.T) {
+	ctx := context.Background()
+	obs := &fakeObserver{}
+	s := NewRoomService(10, metrics.Noop(), WithObserver(obs))
+	phone, _, _ := s.Join(ctx, "r", ident("a", controlpb.Role_SPEAKER), &fakePeer{})
+	desk, _, _ := s.Join(ctx, "r", ident("a", controlpb.Role_SPEAKER), &fakePeer{})
+	b, _, _ := s.Join(ctx, "r", ident("b", controlpb.Role_LISTENER), &fakePeer{})
+	_, _, _ = s.Join(ctx, "other", ident("c", controlpb.Role_SPEAKER), &fakePeer{})
+
+	snap := s.Snapshot()
+	if len(snap["r"]) != 2 || len(snap["other"]) != 1 {
+		t.Fatalf("snapshot %v (one entry per user, not per device)", snap)
+	}
+
+	// a still has the desktop in the room: no leave yet.
+	s.Leave(ctx, phone, "bye")
+	if len(obs.left) != 0 {
+		t.Fatalf("left %v after one of two devices left", obs.left)
+	}
+	s.Leave(ctx, desk, "bye")
+	s.Leave(ctx, b, "bye")
+	s.Leave(ctx, b, "bye") // twice: reported once
+	if len(obs.left) != 2 || obs.left[0] != "r/a" || obs.left[1] != "r/b" {
+		t.Fatalf("left %v", obs.left)
+	}
+
+	if n := s.CloseRoom(ctx, "other", "closed"); n != 1 || len(obs.closed) != 1 || obs.closed[0] != "other" {
+		t.Fatalf("closed %v (kicked %d)", obs.closed, n)
+	}
+	if s.CloseRoom(ctx, "missing", "x") != 0 || len(obs.closed) != 1 {
+		t.Fatal("closing a missing room reported")
+	}
+	if len(s.Snapshot()) != 0 {
+		t.Fatalf("snapshot after everyone left: %v", s.Snapshot())
+	}
+}

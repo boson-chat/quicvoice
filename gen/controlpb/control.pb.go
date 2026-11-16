@@ -219,6 +219,8 @@ type ControlMessage struct {
 	//	*ControlMessage_Data
 	//	*ControlMessage_Ping
 	//	*ControlMessage_Pong
+	//	*ControlMessage_VideoTicketRequest
+	//	*ControlMessage_VideoTicket
 	Msg           isControlMessage_Msg `protobuf_oneof:"msg"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -423,6 +425,24 @@ func (x *ControlMessage) GetPong() *Pong {
 	return nil
 }
 
+func (x *ControlMessage) GetVideoTicketRequest() *VideoTicketRequest {
+	if x != nil {
+		if x, ok := x.Msg.(*ControlMessage_VideoTicketRequest); ok {
+			return x.VideoTicketRequest
+		}
+	}
+	return nil
+}
+
+func (x *ControlMessage) GetVideoTicket() *VideoTicket {
+	if x != nil {
+		if x, ok := x.Msg.(*ControlMessage_VideoTicket); ok {
+			return x.VideoTicket
+		}
+	}
+	return nil
+}
+
 type isControlMessage_Msg interface {
 	isControlMessage_Msg()
 }
@@ -505,6 +525,15 @@ type ControlMessage_Pong struct {
 	Pong *Pong `protobuf:"bytes,61,opt,name=pong,proto3,oneof"`
 }
 
+type ControlMessage_VideoTicketRequest struct {
+	// video (quicvideod): a ticket for the voice channel's video room
+	VideoTicketRequest *VideoTicketRequest `protobuf:"bytes,70,opt,name=video_ticket_request,json=videoTicketRequest,proto3,oneof"`
+}
+
+type ControlMessage_VideoTicket struct {
+	VideoTicket *VideoTicket `protobuf:"bytes,71,opt,name=video_ticket,json=videoTicket,proto3,oneof"`
+}
+
 func (*ControlMessage_Hello) isControlMessage_Msg() {}
 
 func (*ControlMessage_Welcome) isControlMessage_Msg() {}
@@ -540,6 +569,10 @@ func (*ControlMessage_Data) isControlMessage_Msg() {}
 func (*ControlMessage_Ping) isControlMessage_Msg() {}
 
 func (*ControlMessage_Pong) isControlMessage_Msg() {}
+
+func (*ControlMessage_VideoTicketRequest) isControlMessage_Msg() {}
+
+func (*ControlMessage_VideoTicket) isControlMessage_Msg() {}
 
 type Hello struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -1732,11 +1765,129 @@ func (x *Pong) GetId() uint64 {
 	return 0
 }
 
+// Client → server: a ticket for this voice channel's video room. Only for a
+// session in a voice channel; otherwise Error{FORBIDDEN}.
+type VideoTicketRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *VideoTicketRequest) Reset() {
+	*x = VideoTicketRequest{}
+	mi := &file_control_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *VideoTicketRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*VideoTicketRequest) ProtoMessage() {}
+
+func (x *VideoTicketRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_control_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use VideoTicketRequest.ProtoReflect.Descriptor instead.
+func (*VideoTicketRequest) Descriptor() ([]byte, []int) {
+	return file_control_proto_rawDescGZIP(), []int{21}
+}
+
+// Server → client: an EdDSA JWT for quicvideod (aud "quicvideo", rooms =
+// [this voice channel], perms ["video.publish"] unless listener/muted),
+// valid until expires_at. Join the video room named like the voice channel;
+// ask again before expiry and send the new token as quicvideo Refresh.
+type VideoTicket struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Token           string                 `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"`
+	ExpiresAt       int64                  `protobuf:"varint,2,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`                  // Unix seconds
+	QuicUrl         string                 `protobuf:"bytes,3,opt,name=quic_url,json=quicUrl,proto3" json:"quic_url,omitempty"`                         // host:port for native clients (ALPN boson-video/1)
+	WebtransportUrl string                 `protobuf:"bytes,4,opt,name=webtransport_url,json=webtransportUrl,proto3" json:"webtransport_url,omitempty"` // https://host:port/wt for browsers
+	Room            string                 `protobuf:"bytes,5,opt,name=room,proto3" json:"room,omitempty"`                                              // the video room = the voice channel id
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *VideoTicket) Reset() {
+	*x = VideoTicket{}
+	mi := &file_control_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *VideoTicket) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*VideoTicket) ProtoMessage() {}
+
+func (x *VideoTicket) ProtoReflect() protoreflect.Message {
+	mi := &file_control_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use VideoTicket.ProtoReflect.Descriptor instead.
+func (*VideoTicket) Descriptor() ([]byte, []int) {
+	return file_control_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *VideoTicket) GetToken() string {
+	if x != nil {
+		return x.Token
+	}
+	return ""
+}
+
+func (x *VideoTicket) GetExpiresAt() int64 {
+	if x != nil {
+		return x.ExpiresAt
+	}
+	return 0
+}
+
+func (x *VideoTicket) GetQuicUrl() string {
+	if x != nil {
+		return x.QuicUrl
+	}
+	return ""
+}
+
+func (x *VideoTicket) GetWebtransportUrl() string {
+	if x != nil {
+		return x.WebtransportUrl
+	}
+	return ""
+}
+
+func (x *VideoTicket) GetRoom() string {
+	if x != nil {
+		return x.Room
+	}
+	return ""
+}
+
 var File_control_proto protoreflect.FileDescriptor
 
 const file_control_proto_rawDesc = "" +
 	"\n" +
-	"\rcontrol.proto\x12\fquicvoice.v1\"\xb8\b\n" +
+	"\rcontrol.proto\x12\fquicvoice.v1\"\xce\t\n" +
 	"\x0eControlMessage\x12+\n" +
 	"\x05hello\x18\x01 \x01(\v2\x13.quicvoice.v1.HelloH\x00R\x05hello\x121\n" +
 	"\awelcome\x18\x02 \x01(\v2\x15.quicvoice.v1.WelcomeH\x00R\awelcome\x12+\n" +
@@ -1757,7 +1908,9 @@ const file_control_proto_rawDesc = "" +
 	"\bmoderate\x18( \x01(\v2\x16.quicvoice.v1.ModerateH\x00R\bmoderate\x12(\n" +
 	"\x04data\x182 \x01(\v2\x12.quicvoice.v1.DataH\x00R\x04data\x12(\n" +
 	"\x04ping\x18< \x01(\v2\x12.quicvoice.v1.PingH\x00R\x04ping\x12(\n" +
-	"\x04pong\x18= \x01(\v2\x12.quicvoice.v1.PongH\x00R\x04pongB\x05\n" +
+	"\x04pong\x18= \x01(\v2\x12.quicvoice.v1.PongH\x00R\x04pong\x12T\n" +
+	"\x14video_ticket_request\x18F \x01(\v2 .quicvoice.v1.VideoTicketRequestH\x00R\x12videoTicketRequest\x12>\n" +
+	"\fvideo_ticket\x18G \x01(\v2\x19.quicvoice.v1.VideoTicketH\x00R\vvideoTicketB\x05\n" +
 	"\x03msg\"h\n" +
 	"\x05Hello\x12\x14\n" +
 	"\x05token\x18\x01 \x01(\tR\x05token\x12%\n" +
@@ -1869,7 +2022,15 @@ const file_control_proto_rawDesc = "" +
 	"\x04Ping\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x04R\x02id\"\x16\n" +
 	"\x04Pong\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\x04R\x02id*Q\n" +
+	"\x02id\x18\x01 \x01(\x04R\x02id\"\x14\n" +
+	"\x12VideoTicketRequest\"\x9c\x01\n" +
+	"\vVideoTicket\x12\x14\n" +
+	"\x05token\x18\x01 \x01(\tR\x05token\x12\x1d\n" +
+	"\n" +
+	"expires_at\x18\x02 \x01(\x03R\texpiresAt\x12\x19\n" +
+	"\bquic_url\x18\x03 \x01(\tR\aquicUrl\x12)\n" +
+	"\x10webtransport_url\x18\x04 \x01(\tR\x0fwebtransportUrl\x12\x12\n" +
+	"\x04room\x18\x05 \x01(\tR\x04room*Q\n" +
 	"\x04Role\x12\x14\n" +
 	"\x10ROLE_UNSPECIFIED\x10\x00\x12\f\n" +
 	"\bLISTENER\x10\x01\x12\v\n" +
@@ -1890,7 +2051,7 @@ func file_control_proto_rawDescGZIP() []byte {
 }
 
 var file_control_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_control_proto_msgTypes = make([]protoimpl.MessageInfo, 24)
+var file_control_proto_msgTypes = make([]protoimpl.MessageInfo, 26)
 var file_control_proto_goTypes = []any{
 	(Role)(0),                    // 0: quicvoice.v1.Role
 	(Error_Code)(0),              // 1: quicvoice.v1.Error.Code
@@ -1916,9 +2077,11 @@ var file_control_proto_goTypes = []any{
 	(*Data)(nil),                 // 21: quicvoice.v1.Data
 	(*Ping)(nil),                 // 22: quicvoice.v1.Ping
 	(*Pong)(nil),                 // 23: quicvoice.v1.Pong
-	nil,                          // 24: quicvoice.v1.Participant.MetadataEntry
-	nil,                          // 25: quicvoice.v1.RoomState.MetadataEntry
-	nil,                          // 26: quicvoice.v1.SetMetadata.MetadataEntry
+	(*VideoTicketRequest)(nil),   // 24: quicvoice.v1.VideoTicketRequest
+	(*VideoTicket)(nil),          // 25: quicvoice.v1.VideoTicket
+	nil,                          // 26: quicvoice.v1.Participant.MetadataEntry
+	nil,                          // 27: quicvoice.v1.RoomState.MetadataEntry
+	nil,                          // 28: quicvoice.v1.SetMetadata.MetadataEntry
 }
 var file_control_proto_depIdxs = []int32{
 	4,  // 0: quicvoice.v1.ControlMessage.hello:type_name -> quicvoice.v1.Hello
@@ -1939,22 +2102,24 @@ var file_control_proto_depIdxs = []int32{
 	21, // 15: quicvoice.v1.ControlMessage.data:type_name -> quicvoice.v1.Data
 	22, // 16: quicvoice.v1.ControlMessage.ping:type_name -> quicvoice.v1.Ping
 	23, // 17: quicvoice.v1.ControlMessage.pong:type_name -> quicvoice.v1.Pong
-	6,  // 18: quicvoice.v1.Welcome.codec:type_name -> quicvoice.v1.CodecConfig
-	1,  // 19: quicvoice.v1.Error.code:type_name -> quicvoice.v1.Error.Code
-	0,  // 20: quicvoice.v1.Participant.role:type_name -> quicvoice.v1.Role
-	24, // 21: quicvoice.v1.Participant.metadata:type_name -> quicvoice.v1.Participant.MetadataEntry
-	10, // 22: quicvoice.v1.RoomState.participants:type_name -> quicvoice.v1.Participant
-	25, // 23: quicvoice.v1.RoomState.metadata:type_name -> quicvoice.v1.RoomState.MetadataEntry
-	10, // 24: quicvoice.v1.ParticipantJoined.participant:type_name -> quicvoice.v1.Participant
-	10, // 25: quicvoice.v1.ParticipantUpdated.participant:type_name -> quicvoice.v1.Participant
-	26, // 26: quicvoice.v1.SetMetadata.metadata:type_name -> quicvoice.v1.SetMetadata.MetadataEntry
-	2,  // 27: quicvoice.v1.ConnectionQuality.level:type_name -> quicvoice.v1.ConnectionQuality.Level
-	0,  // 28: quicvoice.v1.Moderate.set_role:type_name -> quicvoice.v1.Role
-	29, // [29:29] is the sub-list for method output_type
-	29, // [29:29] is the sub-list for method input_type
-	29, // [29:29] is the sub-list for extension type_name
-	29, // [29:29] is the sub-list for extension extendee
-	0,  // [0:29] is the sub-list for field type_name
+	24, // 18: quicvoice.v1.ControlMessage.video_ticket_request:type_name -> quicvoice.v1.VideoTicketRequest
+	25, // 19: quicvoice.v1.ControlMessage.video_ticket:type_name -> quicvoice.v1.VideoTicket
+	6,  // 20: quicvoice.v1.Welcome.codec:type_name -> quicvoice.v1.CodecConfig
+	1,  // 21: quicvoice.v1.Error.code:type_name -> quicvoice.v1.Error.Code
+	0,  // 22: quicvoice.v1.Participant.role:type_name -> quicvoice.v1.Role
+	26, // 23: quicvoice.v1.Participant.metadata:type_name -> quicvoice.v1.Participant.MetadataEntry
+	10, // 24: quicvoice.v1.RoomState.participants:type_name -> quicvoice.v1.Participant
+	27, // 25: quicvoice.v1.RoomState.metadata:type_name -> quicvoice.v1.RoomState.MetadataEntry
+	10, // 26: quicvoice.v1.ParticipantJoined.participant:type_name -> quicvoice.v1.Participant
+	10, // 27: quicvoice.v1.ParticipantUpdated.participant:type_name -> quicvoice.v1.Participant
+	28, // 28: quicvoice.v1.SetMetadata.metadata:type_name -> quicvoice.v1.SetMetadata.MetadataEntry
+	2,  // 29: quicvoice.v1.ConnectionQuality.level:type_name -> quicvoice.v1.ConnectionQuality.Level
+	0,  // 30: quicvoice.v1.Moderate.set_role:type_name -> quicvoice.v1.Role
+	31, // [31:31] is the sub-list for method output_type
+	31, // [31:31] is the sub-list for method input_type
+	31, // [31:31] is the sub-list for extension type_name
+	31, // [31:31] is the sub-list for extension extendee
+	0,  // [0:31] is the sub-list for field type_name
 }
 
 func init() { file_control_proto_init() }
@@ -1981,6 +2146,8 @@ func file_control_proto_init() {
 		(*ControlMessage_Data)(nil),
 		(*ControlMessage_Ping)(nil),
 		(*ControlMessage_Pong)(nil),
+		(*ControlMessage_VideoTicketRequest)(nil),
+		(*ControlMessage_VideoTicket)(nil),
 	}
 	file_control_proto_msgTypes[17].OneofWrappers = []any{
 		(*Moderate_ServerMute)(nil),
@@ -1994,7 +2161,7 @@ func file_control_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_control_proto_rawDesc), len(file_control_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   24,
+			NumMessages:   26,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

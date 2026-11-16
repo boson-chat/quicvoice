@@ -73,6 +73,7 @@ reference in [docs/ROOMS.md](docs/ROOMS.md#api).
 | `POST /v1/rooms` | Create a room `{name, parent?, min_role?, speak_role?, require_channel_membership?, allowed_roles?}` → `201` |
 | `PATCH /v1/rooms/{id}` | Rename / reorder / re-lock `{name?, position?, min_role?, speak_role?, require_channel_membership?, allowed_roles?}` → `200` |
 | `DELETE /v1/rooms/{id}` | Delete; everyone in it gets `Error{KICKED}` → `204` |
+| `GET /.well-known/video-jwks.json` | Public key for video tickets (only with `VIDEO_QUIC_URL`; no auth). See [docs/VIDEO.md](docs/VIDEO.md) |
 
 Missing, malformed, invalid or expired token → `401`,
 `WWW-Authenticate: Bearer realm="quicvoice"`, body `{"error":"...","code":"unauthorized"}`.
@@ -104,6 +105,7 @@ Missing, malformed, invalid or expired token → `401`,
 | `OTEL_METRICS_EXPORTER` | — | `none` turns OTLP push off even with an endpoint set |
 | `OTEL_METRIC_EXPORT_INTERVAL` | 60000 | OTLP push interval, ms. Other `OTEL_EXPORTER_OTLP_*` vars (headers, timeout, TLS, temporality) and `OTEL_SERVICE_NAME` / `OTEL_RESOURCE_ATTRIBUTES` work as usual |
 | `QUIC_STATS_INTERVAL` | `15s` | How often each connection's QUIC RTT/loss is sampled. `0` = only at close |
+| `VIDEO_QUIC_URL` / `VIDEO_WEBTRANSPORT_URL` | — | Video for voice channels via quicvideod. Empty = off. With `VIDEO_TICKET_KEY_FILE`, `VIDEO_TICKET_ISSUER`, `VIDEO_TICKET_TTL`, `VIDEO_CONTROL_URL`, `VIDEO_CONTROL_TOKEN`: see [docs/VIDEO.md](docs/VIDEO.md#config) |
 | `BOSON_CONFIG` | — | The boson stack config file (e.g. `/config/boson.yaml`), see below. Unset or missing file = env only |
 
 ## Config file (`BOSON_CONFIG`, live reload)
@@ -262,6 +264,7 @@ it only proxies TCP.
 - [docs/PLAN.md](docs/PLAN.md): architecture, milestones, open questions
 - [docs/PROTOCOL.md](docs/PROTOCOL.md): datagram format and control stream
 - [docs/ROOMS.md](docs/ROOMS.md): room registry, creation policy, IRC role locks, rooms API
+- [docs/VIDEO.md](docs/VIDEO.md): video tickets and the control link to quicvideod
 
 ## License
 

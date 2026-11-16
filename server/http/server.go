@@ -14,6 +14,7 @@ import (
 	"github.com/boson-chat/quicvoice/server/internal/logger"
 	"github.com/boson-chat/quicvoice/server/internal/services/auth"
 	"github.com/boson-chat/quicvoice/server/internal/services/room"
+	"github.com/boson-chat/quicvoice/server/internal/services/videoticket"
 	"github.com/boson-chat/quicvoice/server/internal/services/voicechannel"
 )
 
@@ -45,8 +46,10 @@ func NewRouter(version string, metricsHandler nethttp.Handler, cfg ConfigStatus)
 }
 
 // NewPublicRouter serves the public API: the voice room list and registry
-// (GET/POST /v1/rooms, PATCH/DELETE /v1/rooms/{id}) and GET /healthz.
-func NewPublicRouter(a auth.AuthServiceImpl, r room.RoomServiceImpl, vc voicechannel.VoiceChannelServiceImpl) nethttp.Handler {
+// (GET/POST /v1/rooms, PATCH/DELETE /v1/rooms/{id}), GET /healthz and, with
+// video tickets, the ticket JWKS (GET /.well-known/video-jwks.json) that
+// quicvideod verifies against.
+func NewPublicRouter(a auth.AuthServiceImpl, r room.RoomServiceImpl, vc voicechannel.VoiceChannelServiceImpl, tickets ...videoticket.VideoTicketServiceImpl) nethttp.Handler {
 	rooms := &handlers.RoomsHandler{Auth: a, Rooms: r, Channels: vc}
 	mux := nethttp.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthz)
@@ -54,6 +57,14 @@ func NewPublicRouter(a auth.AuthServiceImpl, r room.RoomServiceImpl, vc voicecha
 	mux.HandleFunc("POST /v1/rooms", rooms.Create)
 	mux.HandleFunc("PATCH /v1/rooms/{id}", rooms.Update)
 	mux.HandleFunc("DELETE /v1/rooms/{id}", rooms.Delete)
+	if len(tickets) > 0 && tickets[0] != nil {
+		t := tickets[0]
+		mux.HandleFunc("GET /.well-known/video-jwks.json", func(w nethttp.ResponseWriter, _ *nethttp.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Cache-Control", "max-age=300")
+			_ = json.NewEncoder(w).Encode(t.JWKS())
+		})
+	}
 	return mux
 }
 
@@ -69,10 +80,10 @@ func StartServerWithContext(ctx context.Context, addr, version string, metricsHa
 }
 
 // StartPublicServerWithContext serves the public router until ctx is cancelled.
-func StartPublicServerWithContext(ctx context.Context, addr string, a auth.AuthServiceImpl, r room.RoomServiceImpl, vc voicechannel.VoiceChannelServiceImpl) error {
+func StartPublicServerWithContext(ctx context.Context, addr string, a auth.AuthServiceImpl, r room.RoomServiceImpl, vc voicechannel.VoiceChannelServiceImpl, tickets ...videoticket.VideoTicketServiceImpl) error {
 	return serve(ctx, "public HTTP", &nethttp.Server{
 		Addr:              addr,
-		Handler:           NewPublicRouter(a, r, vc),
+		Handler:           NewPublicRouter(a, r, vc, tickets...),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,

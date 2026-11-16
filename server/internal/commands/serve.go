@@ -20,6 +20,8 @@ import (
 	"github.com/boson-chat/quicvoice/server/internal/services/liveconfig"
 	"github.com/boson-chat/quicvoice/server/internal/services/room"
 	"github.com/boson-chat/quicvoice/server/internal/services/settings"
+	"github.com/boson-chat/quicvoice/server/internal/services/videolink"
+	"github.com/boson-chat/quicvoice/server/internal/services/videoticket"
 	"github.com/boson-chat/quicvoice/server/internal/services/voicechannel"
 	"github.com/boson-chat/quicvoice/server/internal/transport"
 	"github.com/boson-chat/quicvoice/server/metrics"
@@ -81,8 +83,27 @@ var serveCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		roomService := room.NewRoomService(cfg.RoomConfig.MaxParticipants, m,
-			room.WithDirectory(channels, cfg.RoomConfig.Strict), room.WithJoinPolicy(channels))
+		// Video for voice channels: tickets, and the link that keeps
+		// quicvideod's rooms in step with voice channels.
+		var tickets *videoticket.VideoTicketService
+		var link *videolink.VideoLinkService
+		var roomService room.RoomServiceImpl
+		roomOpts := []room.Option{room.WithDirectory(channels, cfg.RoomConfig.Strict), room.WithJoinPolicy(channels)}
+		if vc := cfg.VideoConfig; vc.QUICURL != "" {
+			if tickets, err = videoticket.New(videoticket.Options{KeyFile: vc.TicketKeyFile, Issuer: vc.TicketIssuer, TTL: vc.TicketTTL}); err != nil {
+				return err
+			}
+			if vc.TicketKeyFile == "" {
+				l.Warn().Msg("VIDEO_TICKET_KEY_FILE unset: video tickets use an in-memory key")
+			}
+			if vc.ControlURL != "" {
+				link = videolink.New(videolink.Options{URL: vc.ControlURL, Token: vc.ControlToken,
+					Snapshot: func() map[string][]string { return roomService.Snapshot() }})
+				roomOpts = append(roomOpts, room.WithObserver(link))
+			}
+			l.Info().Str("quic", vc.QUICURL).Bool("control_link", link != nil).Msg("video for voice channels on")
+		}
+		roomService = room.NewRoomService(cfg.RoomConfig.MaxParticipants, m, roomOpts...)
 		l.Info().Int("static", len(roomDefs)).Int("total", len(channels.Defs())).Bool("strict", cfg.RoomConfig.Strict).
 			Str("store", cfg.ChannelConfig.StorePath).Bool("ergo_api", cfg.ChannelConfig.ErgoAPIURL != "").
 			Bool("auth_settings", cfg.ChannelConfig.AuthInternalURL != "").Msg("voice rooms configured")
@@ -103,15 +124,27 @@ var serveCmd = &cobra.Command{
 			return err
 		}
 		quicServer := transport.NewServer(cfg, tlsConf, authService, roomService, m)
+		if tickets != nil {
+			quicServer.SetVideoTickets(tickets)
+		}
 
 		g, gctx := errgroup.WithContext(ctx)
 		g.Go(func() error { return quicServer.Serve(gctx) })
 		g.Go(func() error { watcher.Run(gctx); return nil })
+		if link != nil {
+			g.Go(func() error { link.Run(gctx); return nil })
+		}
 		g.Go(func() error {
 			return http.StartServerWithContext(gctx, cfg.HTTPConfig.Addr, cfg.AppConfig.Version, provider.Handler(), watcher)
 		})
 		if addr := cfg.HTTPConfig.PublicAddr; addr != "" {
-			g.Go(func() error { return http.StartPublicServerWithContext(gctx, addr, authService, roomService, channels) })
+			var jwks videoticket.VideoTicketServiceImpl
+			if tickets != nil {
+				jwks = tickets
+			}
+			g.Go(func() error {
+				return http.StartPublicServerWithContext(gctx, addr, authService, roomService, channels, jwks)
+			})
 		}
 		return g.Wait()
 	},

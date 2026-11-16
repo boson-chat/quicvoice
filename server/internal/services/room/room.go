@@ -143,6 +143,9 @@ type RoomServiceImpl interface {
 	SetMaxParticipants(n int)
 	Leave(ctx context.Context, m *Member, reason string)
 	SetMute(ctx context.Context, m *Member, muted, deafened bool)
+	// Snapshot is the current membership: room → user ids (for the video
+	// link's periodic sync).
+	Snapshot() map[string][]string
 	// Forward fans a raw uplink datagram out to the rest of m's room. It is
 	// the per-packet hot path, so it takes no context and allocates once per
 	// receiver.
@@ -159,12 +162,27 @@ type RoomService struct {
 	strict atomic.Bool
 	policy JoinPolicy
 	now    func() time.Time
+	obs    Observer
 
 	mu    sync.Mutex
 	rooms map[string]*Room
 }
 
 type Option func(*RoomService)
+
+// Observer hears membership changes (the video link forwards them to
+// quicvideod, so video rooms follow voice channels).
+type Observer interface {
+	// MemberLeft: userID has no session left in room.
+	MemberLeft(room, userID string)
+	// RoomClosed: room was closed (everyone removed).
+	RoomClosed(room string)
+}
+
+// WithObserver reports leaves and closed rooms to o.
+func WithObserver(o Observer) Option {
+	return func(s *RoomService) { s.obs = o }
+}
 
 // WithRooms sets the configured rooms. With strict, Join rejects any other
 // room with ErrNotFound; without it, other names still create ad-hoc rooms.
@@ -293,7 +311,29 @@ func (s *RoomService) CloseRoom(ctx context.Context, name, reason string) int {
 		_ = m.peer.SendControl(msg)
 		s.metrics.Leave(ctx, metrics.LeaveKicked)
 	}
+	if s.obs != nil {
+		s.obs.RoomClosed(name)
+	}
 	return len(kicked)
+}
+
+// Snapshot returns room → user ids of everyone currently in a room.
+func (s *RoomService) Snapshot() map[string][]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string][]string, len(s.rooms))
+	for name, r := range s.rooms {
+		r.mu.Lock()
+		seen := map[string]bool{}
+		for _, m := range r.members {
+			if m.Identity != nil && !seen[m.Identity.UserID] {
+				seen[m.Identity.UserID] = true
+				out[name] = append(out[name], m.Identity.UserID)
+			}
+		}
+		r.mu.Unlock()
+	}
+	return out
 }
 
 // participants lists r's members by session id. nil r = no members.
@@ -426,11 +466,20 @@ func (s *RoomService) Leave(_ context.Context, m *Member, reason string) {
 	delete(r.members, m.SessionID)
 	r.rebuildSnapshot()
 	empty := len(r.members) == 0
+	stillHere := false // the same user on another device
+	for _, o := range r.members {
+		if o.Identity != nil && m.Identity != nil && o.Identity.UserID == m.Identity.UserID {
+			stillHere = true
+		}
+	}
 	r.mu.Unlock()
 	if empty {
 		delete(s.rooms, r.name)
 	}
 	s.mu.Unlock()
+	if s.obs != nil && !stillHere && m.Identity != nil {
+		s.obs.MemberLeft(r.name, m.Identity.UserID)
+	}
 
 	r.broadcast(m.SessionID, &controlpb.ControlMessage{Msg: &controlpb.ControlMessage_ParticipantLeft{
 		ParticipantLeft: &controlpb.ParticipantLeft{SessionId: uint32(m.SessionID), Reason: reason},

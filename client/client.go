@@ -48,8 +48,9 @@ type Client struct {
 	writeMu sync.Mutex
 	welcome *controlpb.Welcome
 
+	reqMu     sync.Mutex // one request (Join, VideoTicket) at a time
 	pendingMu sync.Mutex
-	pending   chan *controlpb.ControlMessage // set while Join waits
+	pending   chan *controlpb.ControlMessage // set while a request waits
 
 	sent, received atomic.Uint64
 	rttNanos       atomic.Int64
@@ -114,6 +115,40 @@ func (c *Client) Welcome() *controlpb.Welcome { return c.welcome }
 
 // Join enters a room and returns its state, including our session id.
 func (c *Client) Join(ctx context.Context, room string) (*controlpb.RoomState, error) {
+	m, err := c.request(ctx, &controlpb.ControlMessage{Msg: &controlpb.ControlMessage_Join{
+		Join: &controlpb.Join{Room: room},
+	}})
+	if err != nil {
+		return nil, err
+	}
+	if e := m.GetError(); e != nil {
+		return nil, fmt.Errorf("join %q: %s: %s", room, e.GetCode(), e.GetMessage())
+	}
+	return m.GetRoomState(), nil
+}
+
+// VideoTicket asks for a ticket to the video room of the voice channel
+// we're in (quicvideod verifies it; see docs/video.md).
+func (c *Client) VideoTicket(ctx context.Context) (*controlpb.VideoTicket, error) {
+	m, err := c.request(ctx, &controlpb.ControlMessage{Msg: &controlpb.ControlMessage_VideoTicketRequest{
+		VideoTicketRequest: &controlpb.VideoTicketRequest{},
+	}})
+	if err != nil {
+		return nil, err
+	}
+	if e := m.GetError(); e != nil {
+		return nil, fmt.Errorf("video ticket: %s: %s", e.GetCode(), e.GetMessage())
+	}
+	if m.GetVideoTicket() == nil {
+		return nil, fmt.Errorf("video ticket: unexpected reply")
+	}
+	return m.GetVideoTicket(), nil
+}
+
+// request sends m and waits for the reply (RoomState, VideoTicket or Error).
+func (c *Client) request(ctx context.Context, m *controlpb.ControlMessage) (*controlpb.ControlMessage, error) {
+	c.reqMu.Lock()
+	defer c.reqMu.Unlock()
 	ch := make(chan *controlpb.ControlMessage, 1)
 	c.pendingMu.Lock()
 	c.pending = ch
@@ -124,17 +159,12 @@ func (c *Client) Join(ctx context.Context, room string) (*controlpb.RoomState, e
 		c.pendingMu.Unlock()
 	}()
 
-	if err := c.send(&controlpb.ControlMessage{Msg: &controlpb.ControlMessage_Join{
-		Join: &controlpb.Join{Room: room},
-	}}); err != nil {
+	if err := c.send(m); err != nil {
 		return nil, err
 	}
 	select {
-	case m := <-ch:
-		if e := m.GetError(); e != nil {
-			return nil, fmt.Errorf("join %q: %s: %s", room, e.GetCode(), e.GetMessage())
-		}
-		return m.GetRoomState(), nil
+	case r := <-ch:
+		return r, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-c.conn.Context().Done():
@@ -188,7 +218,7 @@ func (c *Client) controlLoop(rd *wire.ControlReader) {
 		if err != nil {
 			return
 		}
-		if m.GetRoomState() != nil || m.GetError() != nil {
+		if m.GetRoomState() != nil || m.GetError() != nil || m.GetVideoTicket() != nil {
 			c.pendingMu.Lock()
 			if c.pending != nil {
 				select {

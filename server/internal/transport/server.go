@@ -13,6 +13,7 @@ import (
 	"github.com/boson-chat/quicvoice/server/internal/logger"
 	"github.com/boson-chat/quicvoice/server/internal/services/auth"
 	"github.com/boson-chat/quicvoice/server/internal/services/room"
+	"github.com/boson-chat/quicvoice/server/internal/services/videoticket"
 	"github.com/boson-chat/quicvoice/server/metrics"
 	"github.com/boson-chat/quicvoice/wire"
 	"github.com/quic-go/quic-go"
@@ -33,7 +34,11 @@ type Server struct {
 	auth    auth.AuthServiceImpl
 	rooms   room.RoomServiceImpl
 	metrics *metrics.Metrics
+	tickets videoticket.VideoTicketServiceImpl // nil = no video
 }
+
+// SetVideoTickets turns on video tickets for voice-channel members.
+func (s *Server) SetVideoTickets(t videoticket.VideoTicketServiceImpl) { s.tickets = t }
 
 func NewServer(cfg config.Config, tlsConf *tls.Config, a auth.AuthServiceImpl, r room.RoomServiceImpl, m *metrics.Metrics) *Server {
 	tlsConf = tlsConf.Clone()
