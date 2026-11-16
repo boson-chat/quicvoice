@@ -52,6 +52,9 @@ type jitterBuffer struct {
 	mu     sync.Mutex
 	dec    frameDecoder
 	target int // frames to buffer before starting play-out
+	// extra: frames of added delay (lip sync: audio waits for video that
+	// lags). Takes effect from the next talk spurt, so speech isn't cut.
+	extra int
 
 	ring      [ringSize]slot
 	state     jbState
@@ -118,7 +121,7 @@ func (j *jitterBuffer) pop(pcm []int16) bool {
 	case jbIdle:
 		return false
 	case jbBuffering:
-		if j.depthLocked() < j.target {
+		if j.depthLocked() < j.target+j.extra {
 			return false
 		}
 		j.state = jbPlaying
@@ -126,7 +129,7 @@ func (j *jitterBuffer) pop(pcm []int16) bool {
 
 	// Ran long (sender clock faster than ours, or a burst after a stall):
 	// skip ahead so latency doesn't creep up.
-	for j.depthLocked() > j.target+4 {
+	for j.depthLocked() > j.target+j.extra+4 {
 		if s := j.slotFor(j.next); s != nil {
 			s.valid = false
 			j.stats.Dropped++
@@ -179,6 +182,13 @@ func (j *jitterBuffer) poppedTS() (uint32, bool) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	return j.popTS, j.popTSSet
+}
+
+// setExtra sets the added delay in frames.
+func (j *jitterBuffer) setExtra(frames int) {
+	j.mu.Lock()
+	j.extra = frames
+	j.mu.Unlock()
 }
 
 func (j *jitterBuffer) slotFor(seq uint16) *slot {
