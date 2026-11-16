@@ -226,6 +226,24 @@ func (e *Engine) captureAt(pcm []int16, nowUS int64) {
 // Playback fills pcm with mixed audio. Called from the audio callback.
 func (e *Engine) Playback(pcm []int16) { e.mix.read(pcm) }
 
+// Playout is for lip sync: the sender's audio timestamp ts reaches the
+// speaker at local wall clock localUS (Unix µs). Map ts to the sender's
+// capture time with an avsync.Clock fed by its AudioClock reports, and
+// show the sender's video frame captured at that time at localUS. false
+// while the sender is silent.
+func (e *Engine) Playout(sessionID uint16) (ts uint32, localUS int64, ok bool) {
+	return e.mix.playout(sessionID)
+}
+
+// SetOutputLatency sets the time from a playback callback to the speaker
+// (the device's buffering), when the device can tell; otherwise one
+// callback's length is assumed.
+func (e *Engine) SetOutputLatency(d time.Duration) {
+	e.mix.mu.Lock()
+	e.mix.latencyUS = d.Microseconds()
+	e.mix.mu.Unlock()
+}
+
 // vadHangover keeps VAD open between words (15 frames = 300 ms).
 const vadHangover = 15
 
