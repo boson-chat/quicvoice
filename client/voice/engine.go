@@ -235,6 +235,25 @@ func (e *Engine) Playout(sessionID uint16) (ts uint32, localUS int64, ok bool) {
 	return e.mix.playout(sessionID)
 }
 
+// maxPlayoutDelay caps SetPlayoutDelay.
+const (
+	maxPlayoutDelay = 200 * time.Millisecond
+	// FrameDuration is one audio frame (FrameSamples at SampleRate).
+	FrameDuration = time.Duration(FrameSamples) * time.Second / SampleRate
+)
+
+// SetPlayoutDelay delays one sender's audio by d (rounded up to 20 ms
+// frames, at most 200 ms; 0 = none): lip sync, when their video arrives
+// later than their audio would play. It takes effect from their next talk
+// spurt (a longer delay can't be added mid-word without a gap); a shorter
+// one applies at once by skipping ahead. Kept across them leaving and
+// rejoining, like SetUserVolume.
+func (e *Engine) SetPlayoutDelay(sessionID uint16, d time.Duration) {
+	d = min(max(d, 0), maxPlayoutDelay)
+	frames := int((d + FrameDuration - 1) / FrameDuration)
+	e.mix.setDelay(sessionID, frames)
+}
+
 // SetOutputLatency sets the time from a playback callback to the speaker
 // (the device's buffering), when the device can tell; otherwise one
 // callback's length is assumed.

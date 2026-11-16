@@ -32,6 +32,7 @@ type mixer struct {
 	mu       sync.Mutex
 	streams  map[uint16]*stream
 	gains    map[uint16]float32 // remembered across a sender leaving/rejoining
+	delays   map[uint16]int     // extra playout delay in frames, likewise
 	master   float32
 	deafened bool
 
@@ -55,6 +56,7 @@ func newMixer(newDecoder func() (frameDecoder, error), target int) *mixer {
 		target:     target,
 		streams:    map[uint16]*stream{},
 		gains:      map[uint16]float32{},
+		delays:     map[uint16]int{},
 		master:     1,
 		frame:      make([]int16, FrameSamples),
 		pos:        FrameSamples, // empty: mix on first read
@@ -78,6 +80,7 @@ func (m *mixer) push(d wire.Downlink) {
 			gain = 1
 		}
 		s = &stream{jb: newJitterBuffer(dec, m.target), gain: gain}
+		s.jb.extra = m.delays[d.SessionID]
 		m.streams[d.SessionID] = s
 	}
 	if d.Voice {
@@ -101,6 +104,15 @@ func (m *mixer) setGain(sessionID uint16, gain float32) {
 	m.gains[sessionID] = gain
 	if s, ok := m.streams[sessionID]; ok {
 		s.gain = gain
+	}
+}
+
+func (m *mixer) setDelay(sessionID uint16, frames int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.delays[sessionID] = frames
+	if s, ok := m.streams[sessionID]; ok {
+		s.jb.setExtra(frames)
 	}
 }
 
