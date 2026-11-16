@@ -265,3 +265,11 @@ it only proxies TCP.
 - [docs/PROTOCOL.md](docs/PROTOCOL.md): datagram format and control stream
 - [docs/ROOMS.md](docs/ROOMS.md): room registry, creation policy, IRC role locks, rooms API
 - [docs/VIDEO.md](docs/VIDEO.md): video tickets and the control link to quicvideod
+
+## License
+
+Copyright (C) 2026 bludot / the boson authors
+
+Licensed under the [GNU Affero General Public License v3.0](LICENSE) only (`AGPL-3.0-only`).
+
+In plain English: if you run a modified version of this software as a network service, you must offer its source code to the people who use that service.
