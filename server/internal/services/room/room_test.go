@@ -184,3 +184,48 @@ func TestObserverAndSnapshot(t *testing.T) {
 		t.Fatalf("snapshot after everyone left: %v", s.Snapshot())
 	}
 }
+
+func TestBitrateCaps(t *testing.T) {
+	ctx := context.Background()
+	s := NewRoomService(10, metrics.Noop())
+	pa, pb := &fakePeer{}, &fakePeer{}
+	// No caps by default.
+	_, st, _ := s.Join(ctx, "music", ident("a", controlpb.Role_SPEAKER), pa)
+	if st.MaxBitrate != 0 {
+		t.Fatalf("default cap = %d", st.MaxBitrate)
+	}
+	_, _, _ = s.Join(ctx, "general", ident("b", controlpb.Role_SPEAKER), pb)
+	settings := func(p *fakePeer) []*controlpb.RoomSettings {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		var out []*controlpb.RoomSettings
+		for _, m := range p.ctrl {
+			if rs := m.GetRoomSettings(); rs != nil {
+				out = append(out, rs)
+			}
+		}
+		return out
+	}
+
+	s.SetBitrateCaps(64000, map[string]int{"music": 128000})
+	if got := settings(pa); len(got) != 1 || got[0].Room != "music" || got[0].MaxBitrate != 128000 {
+		t.Fatalf("music members got %v", got)
+	}
+	if got := settings(pb); len(got) != 1 || got[0].MaxBitrate != 64000 {
+		t.Fatalf("general members got %v", got)
+	}
+	_, st, _ = s.Join(ctx, "general", ident("c", controlpb.Role_SPEAKER), &fakePeer{})
+	if st.MaxBitrate != 64000 {
+		t.Fatalf("join cap = %d", st.MaxBitrate)
+	}
+
+	// Only rooms whose cap changed hear about it.
+	s.SetBitrateCaps(48000, map[string]int{"music": 128000})
+	if len(settings(pa)) != 1 || len(settings(pb)) != 2 {
+		t.Fatalf("unchanged room notified: a=%v b=%v", settings(pa), settings(pb))
+	}
+	s.SetBitrateCaps(0, nil)
+	if got := settings(pa); len(got) != 2 || got[1].MaxBitrate != 0 {
+		t.Fatalf("cap removed: %v", got)
+	}
+}

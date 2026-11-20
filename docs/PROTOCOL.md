@@ -28,7 +28,8 @@ See `proto/control.proto`. Flow:
 C → S  Hello{token, client_version, capabilities}
 S → C  Welcome{codec, server caps}        | Error + close
 C → S  Join{room}
-S → C  RoomState{your session_id, participants[]}
+S → C  RoomState{your session_id, participants[], max_bitrate}
+S → C  RoomSettings{room, max_bitrate}    (the room's cap changed; config reload)
 ...    ParticipantJoined/Left/Updated, SetMute, SetVoiceTarget, Moderate, Ping/Pong
 C → S  VideoTicketRequest{}               (in a channel; see docs/VIDEO.md)
 C → S  AudioClock{timestamp, capture_us}  (lip sync, below)

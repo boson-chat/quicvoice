@@ -228,3 +228,99 @@ func TestEngineLoopback(t *testing.T) {
 		t.Fatalf("sent %d frames while muted", got-n)
 	}
 }
+
+// feed captures n frames of tone (amp) and waits for the encoder.
+func feed(e *Engine, n int, amp float64, phase *float64) {
+	for range n {
+		e.Capture(sine(FrameSamples, amp, phase))
+		time.Sleep(2 * time.Millisecond)
+	}
+	time.Sleep(40 * time.Millisecond)
+}
+
+func avgPayload(fs []wire.Uplink) float64 {
+	var n int
+	for _, f := range fs {
+		n += len(f.Payload)
+	}
+	return float64(n) / float64(len(fs))
+}
+
+// TestEngineSetBitrate: a bitrate change takes effect mid-stream, with no
+// new spurt (no START flag) and the timestamps carrying on.
+func TestEngineSetBitrate(t *testing.T) {
+	e, err := NewEngine(Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	if e.Bitrate() != 32000 {
+		t.Fatalf("default bitrate %d", e.Bitrate())
+	}
+	snd := &captureSender{}
+	e.SetSender(snd)
+	var phase float64
+	feed(e, 25, 0.5, &phase)
+	low := snd.sent()
+	e.SetBitrate(128000)
+	feed(e, 25, 0.5, &phase)
+	all := snd.sent()
+	high := all[len(low)+5:] // skip the frames around the switch
+	if a, b := avgPayload(low[5:]), avgPayload(high); b < 2*a {
+		t.Fatalf("payload %.0f B at 32k, %.0f B at 128k: bitrate didn't change", a, b)
+	}
+	for _, f := range all[1:] {
+		if f.Flags&wire.FlagStart != 0 {
+			t.Fatal("bitrate change restarted the spurt")
+		}
+	}
+	if e.SetBitrate(1); e.Bitrate() != MinBitrate {
+		t.Fatalf("clamp low: %d", e.Bitrate())
+	}
+	if e.SetBitrate(1e9); e.Bitrate() != MaxBitrate {
+		t.Fatalf("clamp high: %d", e.Bitrate())
+	}
+}
+
+// TestEngineMusicMode: music mode keeps transmitting through quiet
+// passages in voice-activity mode (speech mode gates them), and switching
+// back gates again.
+func TestEngineMusicMode(t *testing.T) {
+	e, err := NewEngine(Options{Bitrate: 128000, Music: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	snd := &captureSender{}
+	e.SetSender(snd)
+	var phase float64
+	feed(e, 10, 0.5, &phase)
+	feed(e, 40, 0.0005, &phase) // ≈ -66 dBFS: below the VAD threshold
+	sent := snd.sent()
+	if len(sent) < 45 {
+		t.Fatalf("music mode sent %d of 50 frames: quiet passage gated", len(sent))
+	}
+	for _, f := range sent {
+		if f.Flags&wire.FlagEnd != 0 {
+			t.Fatal("music mode ended the spurt")
+		}
+	}
+	// Muted still means silent.
+	e.SetMuted(true)
+	feed(e, 5, 0.0005, &phase)
+	n := len(snd.sent())
+	feed(e, 10, 0.5, &phase)
+	if got := len(snd.sent()); got != n {
+		t.Fatalf("sent %d frames while muted in music mode", got-n)
+	}
+	e.SetMuted(false)
+
+	// Back to speech: the quiet closes the spurt and sending stops.
+	e.SetMusic(false)
+	feed(e, 30, 0.0005, &phase)
+	n = len(snd.sent())
+	feed(e, 10, 0.0005, &phase)
+	if got := len(snd.sent()); got != n {
+		t.Fatalf("speech mode sent %d frames of near-silence", got-n)
+	}
+}

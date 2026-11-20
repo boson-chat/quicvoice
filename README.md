@@ -123,10 +123,16 @@ voice:
   rooms:                       # VOICE_ROOMS; [] = no static rooms
     - {id: general, name: General}
     - music                    # bare id: name = id
+    - {id: stage, name: Stage, max_kbps: 128}  # this room's voice bitrate cap
   rooms_strict: true           # VOICE_ROOMS_STRICT
   max_rooms_per_user: 10       # VOICE_ROOMS_MAX_PER_USER
   max_rooms: 500               # VOICE_ROOMS_MAX
   max_participants: 50         # ROOM_MAX_PARTICIPANTS (new joins)
+  max_kbps: 64                 # voice bitrate cap (kbit/s, 6..510) in rooms
+                               # without their own; absent/0 = no cap. Sent to
+                               # clients in RoomState.max_bitrate (and
+                               # RoomSettings when it changes); they encode at
+                               # min(their quality setting, cap). Not enforced.
   settings_ttl: 30s            # SETTINGS_TTL
   ergo_cache_ttl: 15s          # ERGO_CACHE_TTL
   # restart required

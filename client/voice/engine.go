@@ -56,7 +56,8 @@ const (
 
 // Options tune the engine. Zero values give the defaults in brackets.
 type Options struct {
-	Bitrate      int     // Opus bitrate in bit/s [32000]
+	Bitrate      int     // Opus bitrate in bit/s [32000]; see SetBitrate
+	Music        bool    // music mode from the start; see SetMusic
 	JitterFrames int     // frames buffered before play-out starts [3 = 60 ms]
 	VADThreshold float32 // mic level 0..1 above which VAD opens [0.25 ≈ -45 dBFS]
 }
@@ -105,6 +106,13 @@ type Engine struct {
 	stop    chan struct{}
 	stopped sync.WaitGroup
 
+	// want: the encoder settings asked for (SetBitrate, SetMusic); the
+	// encode goroutine applies them before its next frame (libopus
+	// encoders aren't safe for concurrent use).
+	wantMu    sync.Mutex
+	want      encSettings
+	wantDirty atomic.Bool
+
 	micLevel     atomic.Uint32 // float32 bits
 	transmitting atomic.Bool
 	framesSent   atomic.Uint64
@@ -112,14 +120,31 @@ type Engine struct {
 
 type senderBox struct{ s Sender }
 
-func NewEngine(opts Options) (*Engine, error) {
-	opts.defaults()
-	enc, err := opus.NewEncoder(SampleRate, 1, opus.AppVoIP)
+// encSettings are what the Opus encoder is set up with.
+type encSettings struct {
+	bitrate int
+	music   bool
+}
+
+// Bitrate limits (Opus's useful range).
+const (
+	MinBitrate = 6000
+	MaxBitrate = 510000
+)
+
+// newEncoder makes a mono Opus encoder for es: AppVoIP for speech, AppAudio
+// for music; in-band FEC either way.
+func newEncoder(es encSettings) (*opus.Encoder, error) {
+	app := opus.AppVoIP
+	if es.music {
+		app = opus.AppAudio
+	}
+	enc, err := opus.NewEncoder(SampleRate, 1, app)
 	if err != nil {
 		return nil, err
 	}
 	for _, set := range []func() error{
-		func() error { return enc.SetBitrate(opts.Bitrate) },
+		func() error { return enc.SetBitrate(es.bitrate) },
 		func() error { return enc.SetInBandFEC(true) },
 		func() error { return enc.SetPacketLossPerc(10) },
 	} {
@@ -127,9 +152,23 @@ func NewEngine(opts Options) (*Engine, error) {
 			return nil, err
 		}
 	}
+	return enc, nil
+}
+
+func clampBitrate(bps int) int { return max(MinBitrate, min(MaxBitrate, bps)) }
+
+func NewEngine(opts Options) (*Engine, error) {
+	opts.defaults()
+	opts.Bitrate = clampBitrate(opts.Bitrate)
+	es := encSettings{bitrate: opts.Bitrate, music: opts.Music}
+	enc, err := newEncoder(es)
+	if err != nil {
+		return nil, err
+	}
 	e := &Engine{
 		opts:   opts,
 		enc:    enc,
+		want:   es,
 		capBuf: make([]int16, 0, FrameSamples),
 		frames: make(chan capFrame, 8),
 		stop:   make(chan struct{}),
@@ -166,6 +205,60 @@ func (e *Engine) HandleAudio(d wire.Downlink) { e.mix.push(d) }
 
 // RemoveSender drops a participant's stream (call on ParticipantLeft).
 func (e *Engine) RemoveSender(sessionID uint16) { e.mix.remove(sessionID) }
+
+// SetBitrate changes the Opus bitrate (bit/s, clamped to 6000..510000)
+// from the next frame, without interrupting the stream.
+func (e *Engine) SetBitrate(bps int) {
+	e.wantMu.Lock()
+	e.want.bitrate = clampBitrate(bps)
+	e.wantMu.Unlock()
+	e.wantDirty.Store(true)
+}
+
+// SetMusic turns music mode on or off from the next frame. Music mode
+// encodes for music (Opus's audio application, rather than VoIP's speech
+// tuning) and, in voice-activity mode, transmits all the time instead of
+// gating on the mic level, so quiet passages and fades aren't cut.
+// Mute and push-to-talk still apply.
+func (e *Engine) SetMusic(on bool) {
+	e.wantMu.Lock()
+	e.want.music = on
+	e.wantMu.Unlock()
+	e.wantDirty.Store(true)
+}
+
+// Bitrate is the bitrate the engine was last asked for.
+func (e *Engine) Bitrate() int {
+	e.wantMu.Lock()
+	defer e.wantMu.Unlock()
+	return e.want.bitrate
+}
+
+// applySettings brings the encoder in line with SetBitrate/SetMusic. On the
+// encode goroutine only. A failed change keeps the old encoder.
+func (e *Engine) applySettings(cur *encSettings) {
+	if !e.wantDirty.Swap(false) {
+		return
+	}
+	e.wantMu.Lock()
+	want := e.want
+	e.wantMu.Unlock()
+	if want == *cur {
+		return
+	}
+	if want.music != cur.music {
+		// The application can't change after the first frame: a new
+		// encoder (the receivers' decoders don't mind).
+		enc, err := newEncoder(want)
+		if err != nil {
+			return
+		}
+		e.enc = enc
+	} else if e.enc.SetBitrate(want.bitrate) != nil {
+		return
+	}
+	*cur = want
+}
 
 func (e *Engine) SetMode(m Mode)     { e.mode.Store(int32(m)) }
 func (e *Engine) SetPTT(down bool)   { e.pttDown.Store(down) }
@@ -275,6 +368,7 @@ func (e *Engine) encodeLoop() {
 		hang    int
 		out     = make([]byte, maxOpusFrame)
 		lastRep time.Time
+		cur     = encSettings{bitrate: e.opts.Bitrate, music: e.opts.Music}
 	)
 	for {
 		var cf capFrame
@@ -284,6 +378,7 @@ func (e *Engine) encodeLoop() {
 		case cf = <-e.frames:
 		}
 		frame := cf.pcm
+		e.applySettings(&cur)
 
 		level := rmsUnit(frame)
 		e.micLevel.Store(math.Float32bits(level))
@@ -299,7 +394,8 @@ func (e *Engine) encodeLoop() {
 		case ModePushToTalk:
 			want = e.pttDown.Load()
 		default:
-			want = hang > 0
+			// Music mode doesn't gate: a quiet passage isn't silence.
+			want = hang > 0 || cur.music
 		}
 		if e.muted.Load() {
 			want = false

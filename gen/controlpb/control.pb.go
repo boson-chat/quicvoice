@@ -194,7 +194,7 @@ func (x ConnectionQuality_Level) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ConnectionQuality_Level.Descriptor instead.
 func (ConnectionQuality_Level) EnumDescriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{17, 0}
+	return file_control_proto_rawDescGZIP(), []int{18, 0}
 }
 
 type ControlMessage struct {
@@ -210,6 +210,7 @@ type ControlMessage struct {
 	//	*ControlMessage_ParticipantJoined
 	//	*ControlMessage_ParticipantLeft
 	//	*ControlMessage_ParticipantUpdated
+	//	*ControlMessage_RoomSettings
 	//	*ControlMessage_SetMute
 	//	*ControlMessage_SetVoiceTarget
 	//	*ControlMessage_SetMetadata
@@ -340,6 +341,15 @@ func (x *ControlMessage) GetParticipantUpdated() *ParticipantUpdated {
 	if x != nil {
 		if x, ok := x.Msg.(*ControlMessage_ParticipantUpdated); ok {
 			return x.ParticipantUpdated
+		}
+	}
+	return nil
+}
+
+func (x *ControlMessage) GetRoomSettings() *RoomSettings {
+	if x != nil {
+		if x, ok := x.Msg.(*ControlMessage_RoomSettings); ok {
+			return x.RoomSettings
 		}
 	}
 	return nil
@@ -495,6 +505,10 @@ type ControlMessage_ParticipantUpdated struct {
 	ParticipantUpdated *ParticipantUpdated `protobuf:"bytes,15,opt,name=participant_updated,json=participantUpdated,proto3,oneof"`
 }
 
+type ControlMessage_RoomSettings struct {
+	RoomSettings *RoomSettings `protobuf:"bytes,16,opt,name=room_settings,json=roomSettings,proto3,oneof"`
+}
+
 type ControlMessage_SetMute struct {
 	// self state
 	SetMute *SetMute `protobuf:"bytes,20,opt,name=set_mute,json=setMute,proto3,oneof"`
@@ -566,6 +580,8 @@ func (*ControlMessage_ParticipantJoined) isControlMessage_Msg() {}
 func (*ControlMessage_ParticipantLeft) isControlMessage_Msg() {}
 
 func (*ControlMessage_ParticipantUpdated) isControlMessage_Msg() {}
+
+func (*ControlMessage_RoomSettings) isControlMessage_Msg() {}
 
 func (*ControlMessage_SetMute) isControlMessage_Msg() {}
 
@@ -1133,6 +1149,10 @@ type RoomState struct {
 	YourSessionId uint32                 `protobuf:"varint,2,opt,name=your_session_id,json=yourSessionId,proto3" json:"your_session_id,omitempty"`
 	Participants  []*Participant         `protobuf:"bytes,3,rep,name=participants,proto3" json:"participants,omitempty"`
 	Metadata      map[string]string      `protobuf:"bytes,4,rep,name=metadata,proto3" json:"metadata,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// The most a member should send, in Opus bit/s (the server config's
+	// voice.max_kbps, or the room's own max_kbps). 0 = no cap. Clients
+	// encode at min(their choice, this); older clients ignore it.
+	MaxBitrate    uint32 `protobuf:"varint,5,opt,name=max_bitrate,json=maxBitrate,proto3" json:"max_bitrate,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1195,6 +1215,67 @@ func (x *RoomState) GetMetadata() map[string]string {
 	return nil
 }
 
+func (x *RoomState) GetMaxBitrate() uint32 {
+	if x != nil {
+		return x.MaxBitrate
+	}
+	return 0
+}
+
+// S → C: the room's settings changed while you're in it (a config reload).
+// Same meaning as the RoomState fields; older clients ignore it.
+type RoomSettings struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Room          string                 `protobuf:"bytes,1,opt,name=room,proto3" json:"room,omitempty"`
+	MaxBitrate    uint32                 `protobuf:"varint,2,opt,name=max_bitrate,json=maxBitrate,proto3" json:"max_bitrate,omitempty"` // 0 = no cap
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RoomSettings) Reset() {
+	*x = RoomSettings{}
+	mi := &file_control_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RoomSettings) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RoomSettings) ProtoMessage() {}
+
+func (x *RoomSettings) ProtoReflect() protoreflect.Message {
+	mi := &file_control_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RoomSettings.ProtoReflect.Descriptor instead.
+func (*RoomSettings) Descriptor() ([]byte, []int) {
+	return file_control_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *RoomSettings) GetRoom() string {
+	if x != nil {
+		return x.Room
+	}
+	return ""
+}
+
+func (x *RoomSettings) GetMaxBitrate() uint32 {
+	if x != nil {
+		return x.MaxBitrate
+	}
+	return 0
+}
+
 type ParticipantJoined struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Participant   *Participant           `protobuf:"bytes,1,opt,name=participant,proto3" json:"participant,omitempty"`
@@ -1204,7 +1285,7 @@ type ParticipantJoined struct {
 
 func (x *ParticipantJoined) Reset() {
 	*x = ParticipantJoined{}
-	mi := &file_control_proto_msgTypes[10]
+	mi := &file_control_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1216,7 +1297,7 @@ func (x *ParticipantJoined) String() string {
 func (*ParticipantJoined) ProtoMessage() {}
 
 func (x *ParticipantJoined) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[10]
+	mi := &file_control_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1229,7 +1310,7 @@ func (x *ParticipantJoined) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ParticipantJoined.ProtoReflect.Descriptor instead.
 func (*ParticipantJoined) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{10}
+	return file_control_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *ParticipantJoined) GetParticipant() *Participant {
@@ -1249,7 +1330,7 @@ type ParticipantLeft struct {
 
 func (x *ParticipantLeft) Reset() {
 	*x = ParticipantLeft{}
-	mi := &file_control_proto_msgTypes[11]
+	mi := &file_control_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1261,7 +1342,7 @@ func (x *ParticipantLeft) String() string {
 func (*ParticipantLeft) ProtoMessage() {}
 
 func (x *ParticipantLeft) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[11]
+	mi := &file_control_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1274,7 +1355,7 @@ func (x *ParticipantLeft) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ParticipantLeft.ProtoReflect.Descriptor instead.
 func (*ParticipantLeft) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{11}
+	return file_control_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *ParticipantLeft) GetSessionId() uint32 {
@@ -1300,7 +1381,7 @@ type ParticipantUpdated struct {
 
 func (x *ParticipantUpdated) Reset() {
 	*x = ParticipantUpdated{}
-	mi := &file_control_proto_msgTypes[12]
+	mi := &file_control_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1312,7 +1393,7 @@ func (x *ParticipantUpdated) String() string {
 func (*ParticipantUpdated) ProtoMessage() {}
 
 func (x *ParticipantUpdated) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[12]
+	mi := &file_control_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1325,7 +1406,7 @@ func (x *ParticipantUpdated) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ParticipantUpdated.ProtoReflect.Descriptor instead.
 func (*ParticipantUpdated) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{12}
+	return file_control_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *ParticipantUpdated) GetParticipant() *Participant {
@@ -1345,7 +1426,7 @@ type SetMute struct {
 
 func (x *SetMute) Reset() {
 	*x = SetMute{}
-	mi := &file_control_proto_msgTypes[13]
+	mi := &file_control_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1357,7 +1438,7 @@ func (x *SetMute) String() string {
 func (*SetMute) ProtoMessage() {}
 
 func (x *SetMute) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[13]
+	mi := &file_control_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1370,7 +1451,7 @@ func (x *SetMute) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetMute.ProtoReflect.Descriptor instead.
 func (*SetMute) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{13}
+	return file_control_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *SetMute) GetMuted() bool {
@@ -1398,7 +1479,7 @@ type SetVoiceTarget struct {
 
 func (x *SetVoiceTarget) Reset() {
 	*x = SetVoiceTarget{}
-	mi := &file_control_proto_msgTypes[14]
+	mi := &file_control_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1410,7 +1491,7 @@ func (x *SetVoiceTarget) String() string {
 func (*SetVoiceTarget) ProtoMessage() {}
 
 func (x *SetVoiceTarget) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[14]
+	mi := &file_control_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1423,7 +1504,7 @@ func (x *SetVoiceTarget) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetVoiceTarget.ProtoReflect.Descriptor instead.
 func (*SetVoiceTarget) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{14}
+	return file_control_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *SetVoiceTarget) GetId() uint32 {
@@ -1449,7 +1530,7 @@ type SetMetadata struct {
 
 func (x *SetMetadata) Reset() {
 	*x = SetMetadata{}
-	mi := &file_control_proto_msgTypes[15]
+	mi := &file_control_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1461,7 +1542,7 @@ func (x *SetMetadata) String() string {
 func (*SetMetadata) ProtoMessage() {}
 
 func (x *SetMetadata) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[15]
+	mi := &file_control_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1474,7 +1555,7 @@ func (x *SetMetadata) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetMetadata.ProtoReflect.Descriptor instead.
 func (*SetMetadata) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{15}
+	return file_control_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *SetMetadata) GetMetadata() map[string]string {
@@ -1494,7 +1575,7 @@ type SpeakingChanged struct {
 
 func (x *SpeakingChanged) Reset() {
 	*x = SpeakingChanged{}
-	mi := &file_control_proto_msgTypes[16]
+	mi := &file_control_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1506,7 +1587,7 @@ func (x *SpeakingChanged) String() string {
 func (*SpeakingChanged) ProtoMessage() {}
 
 func (x *SpeakingChanged) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[16]
+	mi := &file_control_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1519,7 +1600,7 @@ func (x *SpeakingChanged) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SpeakingChanged.ProtoReflect.Descriptor instead.
 func (*SpeakingChanged) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{16}
+	return file_control_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *SpeakingChanged) GetSessionId() uint32 {
@@ -1546,7 +1627,7 @@ type ConnectionQuality struct {
 
 func (x *ConnectionQuality) Reset() {
 	*x = ConnectionQuality{}
-	mi := &file_control_proto_msgTypes[17]
+	mi := &file_control_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1558,7 +1639,7 @@ func (x *ConnectionQuality) String() string {
 func (*ConnectionQuality) ProtoMessage() {}
 
 func (x *ConnectionQuality) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[17]
+	mi := &file_control_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1571,7 +1652,7 @@ func (x *ConnectionQuality) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConnectionQuality.ProtoReflect.Descriptor instead.
 func (*ConnectionQuality) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{17}
+	return file_control_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *ConnectionQuality) GetSessionId() uint32 {
@@ -1604,7 +1685,7 @@ type Moderate struct {
 
 func (x *Moderate) Reset() {
 	*x = Moderate{}
-	mi := &file_control_proto_msgTypes[18]
+	mi := &file_control_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1616,7 +1697,7 @@ func (x *Moderate) String() string {
 func (*Moderate) ProtoMessage() {}
 
 func (x *Moderate) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[18]
+	mi := &file_control_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1629,7 +1710,7 @@ func (x *Moderate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Moderate.ProtoReflect.Descriptor instead.
 func (*Moderate) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{18}
+	return file_control_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *Moderate) GetSessionId() uint32 {
@@ -1722,7 +1803,7 @@ type Data struct {
 
 func (x *Data) Reset() {
 	*x = Data{}
-	mi := &file_control_proto_msgTypes[19]
+	mi := &file_control_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1734,7 +1815,7 @@ func (x *Data) String() string {
 func (*Data) ProtoMessage() {}
 
 func (x *Data) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[19]
+	mi := &file_control_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1747,7 +1828,7 @@ func (x *Data) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Data.ProtoReflect.Descriptor instead.
 func (*Data) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{19}
+	return file_control_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *Data) GetFromSessionId() uint32 {
@@ -1787,7 +1868,7 @@ type Ping struct {
 
 func (x *Ping) Reset() {
 	*x = Ping{}
-	mi := &file_control_proto_msgTypes[20]
+	mi := &file_control_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1799,7 +1880,7 @@ func (x *Ping) String() string {
 func (*Ping) ProtoMessage() {}
 
 func (x *Ping) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[20]
+	mi := &file_control_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1812,7 +1893,7 @@ func (x *Ping) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Ping.ProtoReflect.Descriptor instead.
 func (*Ping) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{20}
+	return file_control_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *Ping) GetId() uint64 {
@@ -1831,7 +1912,7 @@ type Pong struct {
 
 func (x *Pong) Reset() {
 	*x = Pong{}
-	mi := &file_control_proto_msgTypes[21]
+	mi := &file_control_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1843,7 +1924,7 @@ func (x *Pong) String() string {
 func (*Pong) ProtoMessage() {}
 
 func (x *Pong) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[21]
+	mi := &file_control_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1856,7 +1937,7 @@ func (x *Pong) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Pong.ProtoReflect.Descriptor instead.
 func (*Pong) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{21}
+	return file_control_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *Pong) GetId() uint64 {
@@ -1876,7 +1957,7 @@ type VideoTicketRequest struct {
 
 func (x *VideoTicketRequest) Reset() {
 	*x = VideoTicketRequest{}
-	mi := &file_control_proto_msgTypes[22]
+	mi := &file_control_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1888,7 +1969,7 @@ func (x *VideoTicketRequest) String() string {
 func (*VideoTicketRequest) ProtoMessage() {}
 
 func (x *VideoTicketRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[22]
+	mi := &file_control_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1901,7 +1982,7 @@ func (x *VideoTicketRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VideoTicketRequest.ProtoReflect.Descriptor instead.
 func (*VideoTicketRequest) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{22}
+	return file_control_proto_rawDescGZIP(), []int{23}
 }
 
 // Server → client: an EdDSA JWT for quicvideod (aud "quicvideo", rooms =
@@ -1921,7 +2002,7 @@ type VideoTicket struct {
 
 func (x *VideoTicket) Reset() {
 	*x = VideoTicket{}
-	mi := &file_control_proto_msgTypes[23]
+	mi := &file_control_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1933,7 +2014,7 @@ func (x *VideoTicket) String() string {
 func (*VideoTicket) ProtoMessage() {}
 
 func (x *VideoTicket) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[23]
+	mi := &file_control_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1946,7 +2027,7 @@ func (x *VideoTicket) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VideoTicket.ProtoReflect.Descriptor instead.
 func (*VideoTicket) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{23}
+	return file_control_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *VideoTicket) GetToken() string {
@@ -1988,7 +2069,7 @@ var File_control_proto protoreflect.FileDescriptor
 
 const file_control_proto_rawDesc = "" +
 	"\n" +
-	"\rcontrol.proto\x12\fquicvoice.v1\"\x8b\n" +
+	"\rcontrol.proto\x12\fquicvoice.v1\"\xce\n" +
 	"\n" +
 	"\x0eControlMessage\x12+\n" +
 	"\x05hello\x18\x01 \x01(\v2\x13.quicvoice.v1.HelloH\x00R\x05hello\x121\n" +
@@ -2001,7 +2082,8 @@ const file_control_proto_rawDesc = "" +
 	"room_state\x18\f \x01(\v2\x17.quicvoice.v1.RoomStateH\x00R\troomState\x12P\n" +
 	"\x12participant_joined\x18\r \x01(\v2\x1f.quicvoice.v1.ParticipantJoinedH\x00R\x11participantJoined\x12J\n" +
 	"\x10participant_left\x18\x0e \x01(\v2\x1d.quicvoice.v1.ParticipantLeftH\x00R\x0fparticipantLeft\x12S\n" +
-	"\x13participant_updated\x18\x0f \x01(\v2 .quicvoice.v1.ParticipantUpdatedH\x00R\x12participantUpdated\x122\n" +
+	"\x13participant_updated\x18\x0f \x01(\v2 .quicvoice.v1.ParticipantUpdatedH\x00R\x12participantUpdated\x12A\n" +
+	"\rroom_settings\x18\x10 \x01(\v2\x1a.quicvoice.v1.RoomSettingsH\x00R\froomSettings\x122\n" +
 	"\bset_mute\x18\x14 \x01(\v2\x15.quicvoice.v1.SetMuteH\x00R\asetMute\x12H\n" +
 	"\x10set_voice_target\x18\x15 \x01(\v2\x1c.quicvoice.v1.SetVoiceTargetH\x00R\x0esetVoiceTarget\x12>\n" +
 	"\fset_metadata\x18\x16 \x01(\v2\x19.quicvoice.v1.SetMetadataH\x00R\vsetMetadata\x12J\n" +
@@ -2074,15 +2156,21 @@ const file_control_proto_rawDesc = "" +
 	"\x05guest\x18\t \x01(\bR\x05guest\x1a;\n" +
 	"\rMetadataEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x86\x02\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xa7\x02\n" +
 	"\tRoomState\x12\x12\n" +
 	"\x04room\x18\x01 \x01(\tR\x04room\x12&\n" +
 	"\x0fyour_session_id\x18\x02 \x01(\rR\ryourSessionId\x12=\n" +
 	"\fparticipants\x18\x03 \x03(\v2\x19.quicvoice.v1.ParticipantR\fparticipants\x12A\n" +
-	"\bmetadata\x18\x04 \x03(\v2%.quicvoice.v1.RoomState.MetadataEntryR\bmetadata\x1a;\n" +
+	"\bmetadata\x18\x04 \x03(\v2%.quicvoice.v1.RoomState.MetadataEntryR\bmetadata\x12\x1f\n" +
+	"\vmax_bitrate\x18\x05 \x01(\rR\n" +
+	"maxBitrate\x1a;\n" +
 	"\rMetadataEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"P\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"C\n" +
+	"\fRoomSettings\x12\x12\n" +
+	"\x04room\x18\x01 \x01(\tR\x04room\x12\x1f\n" +
+	"\vmax_bitrate\x18\x02 \x01(\rR\n" +
+	"maxBitrate\"P\n" +
 	"\x11ParticipantJoined\x12;\n" +
 	"\vparticipant\x18\x01 \x01(\v2\x19.quicvoice.v1.ParticipantR\vparticipant\"H\n" +
 	"\x0fParticipantLeft\x12\x1d\n" +
@@ -2164,7 +2252,7 @@ func file_control_proto_rawDescGZIP() []byte {
 }
 
 var file_control_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_control_proto_msgTypes = make([]protoimpl.MessageInfo, 27)
+var file_control_proto_msgTypes = make([]protoimpl.MessageInfo, 28)
 var file_control_proto_goTypes = []any{
 	(Role)(0),                    // 0: quicvoice.v1.Role
 	(Error_Code)(0),              // 1: quicvoice.v1.Error.Code
@@ -2179,23 +2267,24 @@ var file_control_proto_goTypes = []any{
 	(*Leave)(nil),                // 10: quicvoice.v1.Leave
 	(*Participant)(nil),          // 11: quicvoice.v1.Participant
 	(*RoomState)(nil),            // 12: quicvoice.v1.RoomState
-	(*ParticipantJoined)(nil),    // 13: quicvoice.v1.ParticipantJoined
-	(*ParticipantLeft)(nil),      // 14: quicvoice.v1.ParticipantLeft
-	(*ParticipantUpdated)(nil),   // 15: quicvoice.v1.ParticipantUpdated
-	(*SetMute)(nil),              // 16: quicvoice.v1.SetMute
-	(*SetVoiceTarget)(nil),       // 17: quicvoice.v1.SetVoiceTarget
-	(*SetMetadata)(nil),          // 18: quicvoice.v1.SetMetadata
-	(*SpeakingChanged)(nil),      // 19: quicvoice.v1.SpeakingChanged
-	(*ConnectionQuality)(nil),    // 20: quicvoice.v1.ConnectionQuality
-	(*Moderate)(nil),             // 21: quicvoice.v1.Moderate
-	(*Data)(nil),                 // 22: quicvoice.v1.Data
-	(*Ping)(nil),                 // 23: quicvoice.v1.Ping
-	(*Pong)(nil),                 // 24: quicvoice.v1.Pong
-	(*VideoTicketRequest)(nil),   // 25: quicvoice.v1.VideoTicketRequest
-	(*VideoTicket)(nil),          // 26: quicvoice.v1.VideoTicket
-	nil,                          // 27: quicvoice.v1.Participant.MetadataEntry
-	nil,                          // 28: quicvoice.v1.RoomState.MetadataEntry
-	nil,                          // 29: quicvoice.v1.SetMetadata.MetadataEntry
+	(*RoomSettings)(nil),         // 13: quicvoice.v1.RoomSettings
+	(*ParticipantJoined)(nil),    // 14: quicvoice.v1.ParticipantJoined
+	(*ParticipantLeft)(nil),      // 15: quicvoice.v1.ParticipantLeft
+	(*ParticipantUpdated)(nil),   // 16: quicvoice.v1.ParticipantUpdated
+	(*SetMute)(nil),              // 17: quicvoice.v1.SetMute
+	(*SetVoiceTarget)(nil),       // 18: quicvoice.v1.SetVoiceTarget
+	(*SetMetadata)(nil),          // 19: quicvoice.v1.SetMetadata
+	(*SpeakingChanged)(nil),      // 20: quicvoice.v1.SpeakingChanged
+	(*ConnectionQuality)(nil),    // 21: quicvoice.v1.ConnectionQuality
+	(*Moderate)(nil),             // 22: quicvoice.v1.Moderate
+	(*Data)(nil),                 // 23: quicvoice.v1.Data
+	(*Ping)(nil),                 // 24: quicvoice.v1.Ping
+	(*Pong)(nil),                 // 25: quicvoice.v1.Pong
+	(*VideoTicketRequest)(nil),   // 26: quicvoice.v1.VideoTicketRequest
+	(*VideoTicket)(nil),          // 27: quicvoice.v1.VideoTicket
+	nil,                          // 28: quicvoice.v1.Participant.MetadataEntry
+	nil,                          // 29: quicvoice.v1.RoomState.MetadataEntry
+	nil,                          // 30: quicvoice.v1.SetMetadata.MetadataEntry
 }
 var file_control_proto_depIdxs = []int32{
 	5,  // 0: quicvoice.v1.ControlMessage.hello:type_name -> quicvoice.v1.Hello
@@ -2204,37 +2293,38 @@ var file_control_proto_depIdxs = []int32{
 	9,  // 3: quicvoice.v1.ControlMessage.join:type_name -> quicvoice.v1.Join
 	10, // 4: quicvoice.v1.ControlMessage.leave:type_name -> quicvoice.v1.Leave
 	12, // 5: quicvoice.v1.ControlMessage.room_state:type_name -> quicvoice.v1.RoomState
-	13, // 6: quicvoice.v1.ControlMessage.participant_joined:type_name -> quicvoice.v1.ParticipantJoined
-	14, // 7: quicvoice.v1.ControlMessage.participant_left:type_name -> quicvoice.v1.ParticipantLeft
-	15, // 8: quicvoice.v1.ControlMessage.participant_updated:type_name -> quicvoice.v1.ParticipantUpdated
-	16, // 9: quicvoice.v1.ControlMessage.set_mute:type_name -> quicvoice.v1.SetMute
-	17, // 10: quicvoice.v1.ControlMessage.set_voice_target:type_name -> quicvoice.v1.SetVoiceTarget
-	18, // 11: quicvoice.v1.ControlMessage.set_metadata:type_name -> quicvoice.v1.SetMetadata
-	19, // 12: quicvoice.v1.ControlMessage.speaking_changed:type_name -> quicvoice.v1.SpeakingChanged
-	20, // 13: quicvoice.v1.ControlMessage.connection_quality:type_name -> quicvoice.v1.ConnectionQuality
-	21, // 14: quicvoice.v1.ControlMessage.moderate:type_name -> quicvoice.v1.Moderate
-	22, // 15: quicvoice.v1.ControlMessage.data:type_name -> quicvoice.v1.Data
-	23, // 16: quicvoice.v1.ControlMessage.ping:type_name -> quicvoice.v1.Ping
-	24, // 17: quicvoice.v1.ControlMessage.pong:type_name -> quicvoice.v1.Pong
-	25, // 18: quicvoice.v1.ControlMessage.video_ticket_request:type_name -> quicvoice.v1.VideoTicketRequest
-	26, // 19: quicvoice.v1.ControlMessage.video_ticket:type_name -> quicvoice.v1.VideoTicket
-	4,  // 20: quicvoice.v1.ControlMessage.audio_clock:type_name -> quicvoice.v1.AudioClock
-	7,  // 21: quicvoice.v1.Welcome.codec:type_name -> quicvoice.v1.CodecConfig
-	1,  // 22: quicvoice.v1.Error.code:type_name -> quicvoice.v1.Error.Code
-	0,  // 23: quicvoice.v1.Participant.role:type_name -> quicvoice.v1.Role
-	27, // 24: quicvoice.v1.Participant.metadata:type_name -> quicvoice.v1.Participant.MetadataEntry
-	11, // 25: quicvoice.v1.RoomState.participants:type_name -> quicvoice.v1.Participant
-	28, // 26: quicvoice.v1.RoomState.metadata:type_name -> quicvoice.v1.RoomState.MetadataEntry
-	11, // 27: quicvoice.v1.ParticipantJoined.participant:type_name -> quicvoice.v1.Participant
-	11, // 28: quicvoice.v1.ParticipantUpdated.participant:type_name -> quicvoice.v1.Participant
-	29, // 29: quicvoice.v1.SetMetadata.metadata:type_name -> quicvoice.v1.SetMetadata.MetadataEntry
-	2,  // 30: quicvoice.v1.ConnectionQuality.level:type_name -> quicvoice.v1.ConnectionQuality.Level
-	0,  // 31: quicvoice.v1.Moderate.set_role:type_name -> quicvoice.v1.Role
-	32, // [32:32] is the sub-list for method output_type
-	32, // [32:32] is the sub-list for method input_type
-	32, // [32:32] is the sub-list for extension type_name
-	32, // [32:32] is the sub-list for extension extendee
-	0,  // [0:32] is the sub-list for field type_name
+	14, // 6: quicvoice.v1.ControlMessage.participant_joined:type_name -> quicvoice.v1.ParticipantJoined
+	15, // 7: quicvoice.v1.ControlMessage.participant_left:type_name -> quicvoice.v1.ParticipantLeft
+	16, // 8: quicvoice.v1.ControlMessage.participant_updated:type_name -> quicvoice.v1.ParticipantUpdated
+	13, // 9: quicvoice.v1.ControlMessage.room_settings:type_name -> quicvoice.v1.RoomSettings
+	17, // 10: quicvoice.v1.ControlMessage.set_mute:type_name -> quicvoice.v1.SetMute
+	18, // 11: quicvoice.v1.ControlMessage.set_voice_target:type_name -> quicvoice.v1.SetVoiceTarget
+	19, // 12: quicvoice.v1.ControlMessage.set_metadata:type_name -> quicvoice.v1.SetMetadata
+	20, // 13: quicvoice.v1.ControlMessage.speaking_changed:type_name -> quicvoice.v1.SpeakingChanged
+	21, // 14: quicvoice.v1.ControlMessage.connection_quality:type_name -> quicvoice.v1.ConnectionQuality
+	22, // 15: quicvoice.v1.ControlMessage.moderate:type_name -> quicvoice.v1.Moderate
+	23, // 16: quicvoice.v1.ControlMessage.data:type_name -> quicvoice.v1.Data
+	24, // 17: quicvoice.v1.ControlMessage.ping:type_name -> quicvoice.v1.Ping
+	25, // 18: quicvoice.v1.ControlMessage.pong:type_name -> quicvoice.v1.Pong
+	26, // 19: quicvoice.v1.ControlMessage.video_ticket_request:type_name -> quicvoice.v1.VideoTicketRequest
+	27, // 20: quicvoice.v1.ControlMessage.video_ticket:type_name -> quicvoice.v1.VideoTicket
+	4,  // 21: quicvoice.v1.ControlMessage.audio_clock:type_name -> quicvoice.v1.AudioClock
+	7,  // 22: quicvoice.v1.Welcome.codec:type_name -> quicvoice.v1.CodecConfig
+	1,  // 23: quicvoice.v1.Error.code:type_name -> quicvoice.v1.Error.Code
+	0,  // 24: quicvoice.v1.Participant.role:type_name -> quicvoice.v1.Role
+	28, // 25: quicvoice.v1.Participant.metadata:type_name -> quicvoice.v1.Participant.MetadataEntry
+	11, // 26: quicvoice.v1.RoomState.participants:type_name -> quicvoice.v1.Participant
+	29, // 27: quicvoice.v1.RoomState.metadata:type_name -> quicvoice.v1.RoomState.MetadataEntry
+	11, // 28: quicvoice.v1.ParticipantJoined.participant:type_name -> quicvoice.v1.Participant
+	11, // 29: quicvoice.v1.ParticipantUpdated.participant:type_name -> quicvoice.v1.Participant
+	30, // 30: quicvoice.v1.SetMetadata.metadata:type_name -> quicvoice.v1.SetMetadata.MetadataEntry
+	2,  // 31: quicvoice.v1.ConnectionQuality.level:type_name -> quicvoice.v1.ConnectionQuality.Level
+	0,  // 32: quicvoice.v1.Moderate.set_role:type_name -> quicvoice.v1.Role
+	33, // [33:33] is the sub-list for method output_type
+	33, // [33:33] is the sub-list for method input_type
+	33, // [33:33] is the sub-list for extension type_name
+	33, // [33:33] is the sub-list for extension extendee
+	0,  // [0:33] is the sub-list for field type_name
 }
 
 func init() { file_control_proto_init() }
@@ -2252,6 +2342,7 @@ func file_control_proto_init() {
 		(*ControlMessage_ParticipantJoined)(nil),
 		(*ControlMessage_ParticipantLeft)(nil),
 		(*ControlMessage_ParticipantUpdated)(nil),
+		(*ControlMessage_RoomSettings)(nil),
 		(*ControlMessage_SetMute)(nil),
 		(*ControlMessage_SetVoiceTarget)(nil),
 		(*ControlMessage_SetMetadata)(nil),
@@ -2265,7 +2356,7 @@ func file_control_proto_init() {
 		(*ControlMessage_VideoTicket)(nil),
 		(*ControlMessage_AudioClock)(nil),
 	}
-	file_control_proto_msgTypes[18].OneofWrappers = []any{
+	file_control_proto_msgTypes[19].OneofWrappers = []any{
 		(*Moderate_ServerMute)(nil),
 		(*Moderate_SetRole)(nil),
 		(*Moderate_KickReason)(nil),
@@ -2277,7 +2368,7 @@ func file_control_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_control_proto_rawDesc), len(file_control_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   27,
+			NumMessages:   28,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

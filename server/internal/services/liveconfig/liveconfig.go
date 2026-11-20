@@ -1,7 +1,7 @@
 // Package liveconfig applies the stack config file's voice section to a
 // running quicvoiced: static rooms (added, renamed, reordered, removed:
 // people in a removed room are kicked, as when a dynamic room is deleted),
-// strict mode, room limits and cache TTLs change live; listener addresses
+// strict mode, room limits, voice bitrate caps and cache TTLs change live; listener addresses
 // and datagram limits are reported as restart_required.
 package liveconfig
 
@@ -40,6 +40,9 @@ type Applier struct {
 	mu    sync.Mutex
 	cur   config.Config
 	rooms []room.Def
+	// caps: the bitrate caps applied so far; capsSet: any were.
+	caps    config.BitrateCaps
+	capsSet bool
 }
 
 func New(o Options) *Applier {
@@ -109,6 +112,11 @@ func (a *Applier) Apply(ctx context.Context, f config.VoiceFile) ([]string, erro
 	}
 	if a.o.Ergo != nil && next.ChannelConfig.ErgoCacheTTL != a.cur.ChannelConfig.ErgoCacheTTL {
 		a.o.Ergo.SetTTL(next.ChannelConfig.ErgoCacheTTL)
+	}
+	if caps := f.Caps(); !a.capsSet || !caps.Equal(a.caps) {
+		a.o.Rooms.SetBitrateCaps(caps.Default, caps.Rooms)
+		a.caps, a.capsSet = caps, true
+		log.Info().Int("default_bps", caps.Default).Int("rooms", len(caps.Rooms)).Msg("voice bitrate caps updated")
 	}
 	a.cur = next
 	return config.RestartRequired(a.o.Running, next), nil
