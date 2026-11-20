@@ -19,6 +19,29 @@ live whenever `voice.rooms` in the config file changes; people in a removed
 static room are kicked with `voice channel "<name>" was removed from the server
 config` (README: Config file).
 
+## Private calls (`call:<id>`)
+
+A room id starting with `call:` is a **private 1:1 call** (friends and
+private calls in the boson app). The auth service owns the call: it checks
+friends, blocks and privacy settings, rings the other person, and mints
+each of the two people a voice token whose `rooms` claim names the call's
+room. quicvoiced then:
+
+- lets a session join `call:<id>` only with an account (not guest) token
+  whose `rooms` claim **lists that room**: an "any room" token (no `rooms`)
+  is refused with `FORBIDDEN`, so nobody can walk into someone's call;
+- never needs the room in the registry: `VOICE_ROOMS_STRICT` doesn't apply,
+  the room is made on the first join and is gone when the last person
+  leaves, like an ad-hoc room;
+- applies no IRC or role locks to it;
+- never lists it (`GET /v1/rooms` leaves it out for everyone, including the
+  two people in it, also when not strict);
+- hands out video tickets for it like for any room you're in
+  (`VideoTicketRequest` → a ticket for the video room `call:<id>`).
+
+Registry and dynamic room ids can't contain `:`, so nothing else can use the
+prefix. Old clients never see these rooms.
+
 ## Who can do what
 
 ### Network roles and permissions (voice token claims)

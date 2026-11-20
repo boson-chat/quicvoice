@@ -7,6 +7,7 @@ import (
 	"errors"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -232,7 +233,29 @@ func NewStaticDirectory(defs []Def) Directory {
 func (d *staticDirectory) Defs() []Def        { return d.defs }
 func (d *staticDirectory) Has(id string) bool { return d.has[id] }
 
-func (s *RoomService) defined(id string) bool { return s.dir != nil && s.dir.Has(id) }
+func (s *RoomService) defined(id string) bool {
+	return s.dir != nil && !IsPrivateCall(id) && s.dir.Has(id)
+}
+
+// PrivateCallPrefix starts the id of a private 1:1 call room ("call:<id>").
+// Such rooms are never in the registry or a room list, exist only while
+// someone is in them, and can be joined only with a voice token whose
+// `rooms` claim names the room (an account token, never a guest's). The
+// auth service mints those after its call policy (friends, blocks, privacy)
+// said yes, for the two people on the call. Registry and ad-hoc room ids
+// can't contain ':', so nothing else can use the prefix.
+const PrivateCallPrefix = "call:"
+
+// IsPrivateCall reports whether room is a private call room.
+func IsPrivateCall(room string) bool {
+	return strings.HasPrefix(room, PrivateCallPrefix) && len(room) > len(PrivateCallPrefix)
+}
+
+// CanJoinPrivateCall: id's token names room explicitly (an empty `rooms`
+// claim, "any room", is not enough) and isn't a guest's.
+func CanJoinPrivateCall(id *auth.Identity, room string) bool {
+	return id != nil && !id.Guest && slices.Contains(id.Rooms, room)
+}
 
 // WithClock replaces time.Now (tests).
 func WithClock(now func() time.Time) Option {
@@ -313,7 +336,8 @@ func (s *RoomService) List(_ context.Context, id *auth.Identity) []Info {
 	}
 	var adhoc []string
 	for name := range live {
-		if !s.defined(name) && id.CanJoin(name) {
+		// Private calls are unlisted, whoever asks.
+		if !s.defined(name) && !IsPrivateCall(name) && id.CanJoin(name) {
 			adhoc = append(adhoc, name)
 		}
 	}
@@ -436,13 +460,21 @@ func (s *RoomService) Join(ctx context.Context, name string, id *auth.Identity, 
 	if name == "" {
 		return nil, nil, ErrEmptyRoom
 	}
-	if s.strict.Load() && !s.defined(name) {
+	private := IsPrivateCall(name)
+	switch {
+	case private:
+		// A private call: never in the registry (strict doesn't apply), and
+		// only for a token that names the room itself. The auth service
+		// mints those for the call's two people only.
+		if !CanJoinPrivateCall(id, name) {
+			return nil, nil, ErrForbidden
+		}
+	case s.strict.Load() && !s.defined(name):
 		return nil, nil, ErrNotFound
-	}
-	if !id.CanJoin(name) {
+	case !id.CanJoin(name):
 		return nil, nil, ErrForbidden
 	}
-	if s.policy != nil && s.defined(name) {
+	if s.policy != nil && !private && s.defined(name) {
 		canSpeak, err := s.policy.AuthorizeJoin(ctx, name, id)
 		if err != nil {
 			return nil, nil, err
