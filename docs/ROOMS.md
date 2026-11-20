@@ -53,6 +53,25 @@ no roles".
 | `oper` role / founder of every channel | never (real IRC role only; `oper` locks are passed with `voice.bypass_locks`) | `role` `moderator`/`admin` |
 | Allowed to create at all | `voice.create` or `voice.manage_any` | yes (the policy decides) |
 
+### Guest tokens
+
+The auth service can also mint voice tokens for IRC guests with no account
+(`POST /v1/voice/guest-token`, when its `auth.guest_voice` setting is on).
+They carry `"guest": true`, `sub` = `guest:<id>`, `name` = the guest's IRC
+nick (unverified), `role` `speaker` and empty `roles`/`perms`. quicvoiced:
+
+- refuses a token whose `guest` claim and `guest:` subject prefix disagree;
+- never treats the nick as an Ergo account (no channel standing: the guest
+  is a plain `member` everywhere, even if an account has the same name);
+- never makes a guest a network admin, lock bypasser or room creator, and
+  caps its role at `speaker`, whatever else the token says.
+
+So guests can join (and speak in) open rooms only; `min_role`,
+`require_channel_membership` and `allowed_roles` all keep them out, and
+`speak_role` above `member` makes them listeners. Guests show up with
+`"guest": true` in `participants` and in the control protocol's
+`Participant.guest`.
+
 ### Creating rooms: `voice_channel_creation`
 
 The auth service's network setting (admin panel), read from
@@ -234,7 +253,8 @@ Errors: `{"error": "human text", "code": "<code>"}`.
 - `can_manage`: the caller may PATCH/DELETE it. `can_join` / `can_speak`:
   the caller's result of the locks above (and the token's `rooms` claim).
 - `participants`: as before (sorted by `session_id`; `muted` = self- or
-  server-muted; `speaking` = voiced frame in the last second).
+  server-muted; `speaking` = voiced frame in the last second; `guest: true`
+  for IRC guests, omitted otherwise).
 
 ### `POST /v1/rooms` → 201
 

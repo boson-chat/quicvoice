@@ -74,6 +74,8 @@ type participantJSON struct {
 	Muted     bool   `json:"muted"`
 	Deafened  bool   `json:"deafened"`
 	Speaking  bool   `json:"speaking"`
+	// Guest: an IRC guest with no account (name is an unverified nick).
+	Guest bool `json:"guest,omitempty"`
 }
 
 type errorJSON struct {
@@ -88,7 +90,7 @@ func participantsJSON(ps []room.ParticipantInfo) []participantJSON {
 	for _, p := range ps {
 		out = append(out, participantJSON{
 			SessionID: p.SessionID, UserID: p.UserID, Name: p.Name,
-			Muted: p.Muted, Deafened: p.Deafened, Speaking: p.Speaking,
+			Muted: p.Muted, Deafened: p.Deafened, Speaking: p.Speaking, Guest: p.Guest,
 		})
 	}
 	return out

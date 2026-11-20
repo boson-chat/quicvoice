@@ -384,6 +384,9 @@ func (c *caller) standing() (*ergo.Standing, error) {
 // with a perms claim: voice.manage_any (the role claim is ignored); older
 // tokens: role moderator/admin.
 func (c *caller) admin() bool {
+	if c.id.Guest {
+		return false
+	}
 	if c.id.HasNetworkPerms() {
 		return c.id.HasPerm(auth.PermVoiceManageAny)
 	}
@@ -394,6 +397,9 @@ func (c *caller) admin() bool {
 // require_channel_membership, allowed_roles). Tokens with a perms claim:
 // voice.bypass_locks; older tokens: role moderator/admin.
 func (c *caller) bypass() bool {
+	if c.id.Guest {
+		return false
+	}
 	if c.id.HasNetworkPerms() {
 		return c.id.HasPerm(auth.PermVoiceBypassLocks)
 	}
@@ -404,6 +410,9 @@ func (c *caller) bypass() bool {
 // where). Tokens with a perms claim need voice.create or voice.manage_any;
 // older tokens always pass this gate.
 func (c *caller) createPerm() bool {
+	if c.id.Guest {
+		return false
+	}
 	return !c.id.HasNetworkPerms() || c.id.HasPerm(auth.PermVoiceCreate) || c.id.HasPerm(auth.PermVoiceManageAny)
 }
 
@@ -411,7 +420,7 @@ func (c *caller) createPerm() bool {
 // Only those are oper (and so founder) in every channel; with perms the
 // IRC role is always the real one.
 func (c *caller) legacyAdmin() bool {
-	return !c.id.HasNetworkPerms() && c.id.IsStaff()
+	return !c.id.Guest && !c.id.HasNetworkPerms() && c.id.IsStaff()
 }
 
 // hasAllowedRole: rec has no allowed_roles, or the caller holds one of them.

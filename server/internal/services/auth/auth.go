@@ -35,7 +35,15 @@ type Identity struct {
 	HasRoles     bool
 	Perms        []string
 	HasPerms     bool
+
+	// Guest: an IRC guest with no auth account (token `guest` claim).
+	// UserID is "guest:<id>", DisplayName the unverified nick, Account "",
+	// no network roles or permissions, and the role is at most speaker.
+	Guest bool
 }
+
+// GuestSubjectPrefix starts the `sub` of every guest token.
+const GuestSubjectPrefix = "guest:"
 
 // Voice permissions carried in the `perms` claim. Others are ignored.
 const (
@@ -50,7 +58,7 @@ func (i *Identity) CanJoin(room string) bool {
 
 // IsStaff: network-level admin (auth admins get voice role moderator).
 func (i *Identity) IsStaff() bool {
-	return i.Role >= controlpb.Role_MODERATOR
+	return !i.Guest && i.Role >= controlpb.Role_MODERATOR
 }
 
 // HasNetworkPerms: the token carries the `perms` claim, so permission
@@ -82,6 +90,8 @@ type Claims struct {
 	// (token from before network roles); a pointer to [] = present, empty.
 	Roles *[]string `json:"roles,omitempty"`
 	Perms *[]string `json:"perms,omitempty"`
+	// Guest: token for an IRC guest (sub "guest:<id>", name = nick).
+	Guest bool `json:"guest,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -109,9 +119,20 @@ func identityFromClaims(c *Claims, err error) (*Identity, error) {
 	if err != nil || c.Subject == "" {
 		return nil, ErrUnauthenticated
 	}
+	// guest:<id> subjects belong to guest tokens only, both ways round.
+	if c.Guest != strings.HasPrefix(c.Subject, GuestSubjectPrefix) || c.Subject == GuestSubjectPrefix {
+		return nil, ErrUnauthenticated
+	}
 	name := c.Name
 	if name == "" {
 		name = c.Subject
+	}
+	if c.Guest {
+		// The nick is unverified: never an Ergo account, never any network
+		// role or permission, never more than speaker, whatever the token says.
+		role := min(parseRole(c.Role), controlpb.Role_SPEAKER)
+		return &Identity{UserID: c.Subject, DisplayName: name, Role: role, Rooms: c.Rooms,
+			Guest: true, HasRoles: true, NetworkRoles: []string{}, HasPerms: true, Perms: []string{}}, nil
 	}
 	id := &Identity{UserID: c.Subject, DisplayName: name, Account: c.Name, Role: parseRole(c.Role), Rooms: c.Rooms}
 	if c.Roles != nil {
