@@ -1029,6 +1029,7 @@ type Participant struct {
 	ServerMuted   bool                   `protobuf:"varint,6,opt,name=server_muted,json=serverMuted,proto3" json:"server_muted,omitempty"`
 	Deafened      bool                   `protobuf:"varint,7,opt,name=deafened,proto3" json:"deafened,omitempty"`
 	Metadata      map[string]string      `protobuf:"bytes,8,rep,name=metadata,proto3" json:"metadata,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // app-defined (avatar, etc.)
+	Guest         bool                   `protobuf:"varint,9,opt,name=guest,proto3" json:"guest,omitempty"`                                                                                // IRC guest, no account; display_name is an unverified nick
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1117,6 +1118,13 @@ func (x *Participant) GetMetadata() map[string]string {
 		return x.Metadata
 	}
 	return nil
+}
+
+func (x *Participant) GetGuest() bool {
+	if x != nil {
+		return x.Guest
+	}
+	return false
 }
 
 type RoomState struct {
@@ -2051,7 +2059,7 @@ const file_control_proto_rawDesc = "" +
 	"\x06BANNED\x10\b\"\x1a\n" +
 	"\x04Join\x12\x12\n" +
 	"\x04room\x18\x01 \x01(\tR\x04room\"\a\n" +
-	"\x05Leave\"\xf0\x02\n" +
+	"\x05Leave\"\x86\x03\n" +
 	"\vParticipant\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\rR\tsessionId\x12\x17\n" +
@@ -2062,7 +2070,8 @@ const file_control_proto_rawDesc = "" +
 	"self_muted\x18\x05 \x01(\bR\tselfMuted\x12!\n" +
 	"\fserver_muted\x18\x06 \x01(\bR\vserverMuted\x12\x1a\n" +
 	"\bdeafened\x18\a \x01(\bR\bdeafened\x12C\n" +
-	"\bmetadata\x18\b \x03(\v2'.quicvoice.v1.Participant.MetadataEntryR\bmetadata\x1a;\n" +
+	"\bmetadata\x18\b \x03(\v2'.quicvoice.v1.Participant.MetadataEntryR\bmetadata\x12\x14\n" +
+	"\x05guest\x18\t \x01(\bR\x05guest\x1a;\n" +
 	"\rMetadataEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x86\x02\n" +

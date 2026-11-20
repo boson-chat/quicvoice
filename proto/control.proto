@@ -113,6 +113,7 @@ message Participant {
   bool server_muted = 6;
   bool deafened = 7;
   map<string, string> metadata = 8; // app-defined (avatar, etc.)
+  bool guest = 9;            // IRC guest, no account; display_name is an unverified nick
 }
 
 enum Role {

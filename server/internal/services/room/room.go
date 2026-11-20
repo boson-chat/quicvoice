@@ -75,6 +75,7 @@ func (m *Member) participant() *controlpb.Participant {
 		SelfMuted:   m.selfMuted.Load(),
 		ServerMuted: m.serverMuted.Load(),
 		Deafened:    m.deafened.Load(),
+		Guest:       m.Identity.Guest,
 	}
 }
 
@@ -109,6 +110,8 @@ type ParticipantInfo struct {
 	Deafened bool
 	// Speaking: a voiced frame was forwarded within SpeakingWindow.
 	Speaking bool
+	// Guest: an IRC guest with no account; Name is an unverified nick.
+	Guest bool
 }
 
 // Directory is the registry of defined rooms (static VOICE_ROOMS plus
@@ -357,6 +360,7 @@ func (r *Room) participants(now int64) []ParticipantInfo {
 			Muted:     m.selfMuted.Load() || m.serverMuted.Load(),
 			Deafened:  m.deafened.Load(),
 			Speaking:  last != 0 && now-last < int64(SpeakingWindow),
+			Guest:     m.Identity.Guest,
 		})
 	}
 	slices.SortFunc(out, func(a, b ParticipantInfo) int { return cmp.Compare(a.SessionID, b.SessionID) })
