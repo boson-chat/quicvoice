@@ -23,6 +23,9 @@ import (
 type RoomEntry struct {
 	ID   string
 	Name string
+	// MaxKbps caps the voice bitrate in this room (kbit/s); 0 = the
+	// section's max_kbps.
+	MaxKbps int
 }
 
 // VoiceFile is the `voice:` section. nil = key absent.
@@ -35,6 +38,9 @@ type VoiceFile struct {
 	MaxParticipants *int           // ROOM_MAX_PARTICIPANTS
 	SettingsTTL     *time.Duration // SETTINGS_TTL
 	ErgoCacheTTL    *time.Duration // ERGO_CACHE_TTL
+	// MaxKbps caps the voice bitrate in every room without its own
+	// max_kbps (kbit/s). Absent = no cap.
+	MaxKbps *int
 
 	// Take effect after a restart.
 	QUICAddr           *string // QUIC_ADDR
@@ -53,6 +59,7 @@ const (
 	KeyMaxParticipants    = "voice.max_participants"
 	KeySettingsTTL        = "voice.settings_ttl"
 	KeyErgoCacheTTL       = "voice.ergo_cache_ttl"
+	KeyMaxKbps            = "voice.max_kbps"
 	KeyQUICAddr           = "voice.quic_addr"
 	KeyHTTPAddr           = "voice.http_addr"
 	KeyPublicHTTPAddr     = "voice.public_http_addr"
@@ -63,6 +70,12 @@ const (
 var (
 	roomIDPattern = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
 	maxRoomName   = 64
+)
+
+// Voice bitrate caps (max_kbps): Opus's useful range.
+const (
+	MinKbps = 6
+	MaxKbps = 510
 )
 
 // ParseVoiceFile parses a whole config file and returns its voice section.
@@ -123,6 +136,8 @@ func ParseVoiceFile(data []byte) (VoiceFile, error) {
 			f.SettingsTTL, err = duration(k.Value, v)
 		case "ergo_cache_ttl":
 			f.ErgoCacheTTL, err = duration(k.Value, v)
+		case "max_kbps":
+			f.MaxKbps, err = kbps("voice.max_kbps", v)
 		case "quic_addr":
 			f.QUICAddr, err = addr(k.Value, v, false)
 		case "http_addr":
@@ -184,6 +199,18 @@ func positive(key string, v *yaml.Node, maxV int) (*int, error) {
 	return n, nil
 }
 
+// kbps: a bitrate cap in kbit/s, MinKbps..MaxKbps; 0 = no cap.
+func kbps(key string, v *yaml.Node) (*int, error) {
+	var n int
+	if v.Kind != yaml.ScalarNode || v.Decode(&n) != nil {
+		return nil, configfile.Errorf(v.Line, v.Column, "%s: want a whole number of kbit/s like 64", key)
+	}
+	if n != 0 && (n < MinKbps || n > MaxKbps) {
+		return nil, configfile.Errorf(v.Line, v.Column, "%s: must be %d..%d kbit/s (0 = no cap), got %d", key, MinKbps, MaxKbps, n)
+	}
+	return &n, nil
+}
+
 func duration(key string, v *yaml.Node) (*time.Duration, error) {
 	var s string
 	if err := v.Decode(&s); err != nil {
@@ -234,6 +261,13 @@ func parseRooms(v *yaml.Node) ([]RoomEntry, error) {
 				}
 				e.Name = strings.TrimSpace(n.Value)
 			}
+			if n := lookup(it, "max_kbps"); n != nil && !isNull(n) {
+				k, err := kbps("voice.rooms: max_kbps", n)
+				if err != nil {
+					return nil, err
+				}
+				e.MaxKbps = *k
+			}
 		default:
 			return nil, configfile.Errorf(it.Line, it.Column, "voice.rooms: entry must be {id: ..., name: ...}")
 		}
@@ -262,6 +296,53 @@ func (f VoiceFile) StaticRooms() (rooms []RoomEntry, ok bool) {
 		return nil, false
 	}
 	return slices.Clone(*f.Rooms), true
+}
+
+// BitrateCaps are the voice bitrate caps in bit/s: def for every room,
+// rooms for the static rooms with their own max_kbps. 0 = no cap.
+type BitrateCaps struct {
+	Default int
+	Rooms   map[string]int
+}
+
+// Of is room's cap in bit/s (0 = none).
+func (c BitrateCaps) Of(room string) int {
+	if b, ok := c.Rooms[room]; ok {
+		return b
+	}
+	return c.Default
+}
+
+// Equal reports whether c and o cap every room the same.
+func (c BitrateCaps) Equal(o BitrateCaps) bool {
+	if c.Default != o.Default || len(c.Rooms) != len(o.Rooms) {
+		return false
+	}
+	for k, v := range c.Rooms {
+		if w, ok := o.Rooms[k]; !ok || w != v {
+			return false
+		}
+	}
+	return true
+}
+
+// Caps is the file's voice bitrate caps (max_kbps and the rooms' own).
+func (f VoiceFile) Caps() BitrateCaps {
+	var c BitrateCaps
+	if f.MaxKbps != nil {
+		c.Default = *f.MaxKbps * 1000
+	}
+	if f.Rooms != nil {
+		for _, r := range *f.Rooms {
+			if r.MaxKbps > 0 {
+				if c.Rooms == nil {
+					c.Rooms = map[string]int{}
+				}
+				c.Rooms[r.ID] = r.MaxKbps * 1000
+			}
+		}
+	}
+	return c
 }
 
 // Effective is base (env + defaults) with the file's keys on top, except
@@ -316,8 +397,9 @@ func ExportVoice(cfg Config, f VoiceFile, rooms []RoomEntry, lookupEnv func(stri
 		return ok || file
 	}
 	type room struct {
-		ID   string `yaml:"id"`
-		Name string `yaml:"name"`
+		ID      string `yaml:"id"`
+		Name    string `yaml:"name"`
+		MaxKbps int    `yaml:"max_kbps,omitempty"`
 	}
 	sec := &yaml.Node{Kind: yaml.MappingNode}
 	add := func(key string, v any) error {
@@ -345,6 +427,7 @@ func ExportVoice(cfg Config, f VoiceFile, rooms []RoomEntry, lookupEnv func(stri
 		{"max_participants", has("ROOM_MAX_PARTICIPANTS", f.MaxParticipants != nil), cfg.RoomConfig.MaxParticipants},
 		{"settings_ttl", has("SETTINGS_TTL", f.SettingsTTL != nil), cfg.ChannelConfig.SettingsTTL.String()},
 		{"ergo_cache_ttl", has("ERGO_CACHE_TTL", f.ErgoCacheTTL != nil), cfg.ChannelConfig.ErgoCacheTTL.String()},
+		{"max_kbps", f.MaxKbps != nil, deref(f.MaxKbps)},
 		{"quic_addr", has("QUIC_ADDR", f.QUICAddr != nil), cfg.QUICConfig.Addr},
 		{"http_addr", has("HTTP_ADDR", f.HTTPAddr != nil), cfg.HTTPConfig.Addr},
 		{"public_http_addr", has("PUBLIC_HTTP_ADDR", f.PublicHTTPAddr != nil), cfg.HTTPConfig.PublicAddr},
@@ -366,6 +449,13 @@ func ExportVoice(cfg Config, f VoiceFile, rooms []RoomEntry, lookupEnv func(stri
 		return nil, err
 	}
 	return buf.Bytes(), enc.Close()
+}
+
+func deref(p *int) int {
+	if p == nil {
+		return 0
+	}
+	return *p
 }
 
 // ReadVoiceFile reads path ("" or missing = no keys).

@@ -31,7 +31,7 @@ voice:
 		t.Fatal(err)
 	}
 	rooms, ok := f.StaticRooms()
-	if !ok || !slices.Equal(rooms, []RoomEntry{{"general", "General"}, {"music", "music"}}) {
+	if !ok || !slices.Equal(rooms, []RoomEntry{{ID: "general", Name: "General"}, {ID: "music", Name: "music"}}) {
 		t.Fatalf("rooms = %v %v", rooms, ok)
 	}
 	var base Config
@@ -81,6 +81,9 @@ func TestParseVoiceFileErrors(t *testing.T) {
 		{"version: 2\nvoice: {}\n", 1, 10, "unsupported config file version"},
 		{"voice:\n  rooms: [\n", 0, 0, "yaml"},
 		{"voice:\n\trooms: []\n", 2, 0, "yaml"},
+		{"voice:\n  max_kbps: 4\n", 2, 13, "must be 6..510"},
+		{"voice:\n  max_kbps: lots\n", 2, 13, "whole number"},
+		{"voice:\n  rooms: [{id: a, max_kbps: 600}]\n", 2, 29, "max_kbps: must be 6..510"},
 	} {
 		_, err := ParseVoiceFile([]byte(c.in))
 		if err == nil || !strings.Contains(err.Error(), c.msg) {
@@ -102,7 +105,7 @@ func TestExportVoice(t *testing.T) {
 	cfg.ChannelConfig.MaxPerUser = 10
 	cfg.ChannelConfig.MaxRooms = 77
 	env := map[string]string{"VOICE_ROOMS_MAX": "77"}
-	out, err := ExportVoice(cfg, VoiceFile{}, []RoomEntry{{"general", "General"}}, func(k string) (string, bool) {
+	out, err := ExportVoice(cfg, VoiceFile{}, []RoomEntry{{ID: "general", Name: "General"}}, func(k string) (string, bool) {
 		v, ok := env[k]
 		return v, ok
 	})
@@ -128,5 +131,43 @@ func TestReadVoiceFile(t *testing.T) {
 	_ = os.WriteFile(p, []byte("voice:\n  max_rooms: x\n"), 0o644)
 	if _, err := ReadVoiceFile(p); err == nil || !strings.Contains(err.Error(), p) {
 		t.Fatalf("invalid file: %v", err)
+	}
+}
+
+func TestBitrateCaps(t *testing.T) {
+	f, err := ParseVoiceFile([]byte(`voice:
+  max_kbps: 64
+  rooms:
+    - {id: general, name: General}
+    - {id: music, name: Music, max_kbps: 128}
+    - {id: lobby, max_kbps: 0}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := f.Caps()
+	for room, want := range map[string]int{"general": 64000, "music": 128000, "lobby": 64000, "adhoc": 64000} {
+		if got := c.Of(room); got != want {
+			t.Errorf("Of(%s) = %d, want %d", room, got, want)
+		}
+	}
+	if !c.Equal(f.Caps()) || c.Equal(BitrateCaps{Default: 64000}) || c.Equal(BitrateCaps{Default: 64000, Rooms: map[string]int{"music": 96000}}) {
+		t.Fatal("Equal")
+	}
+	// No keys: no cap anywhere.
+	none, _ := ParseVoiceFile([]byte("voice:\n  rooms: [general]\n"))
+	if c := none.Caps(); c.Of("general") != 0 || !c.Equal(BitrateCaps{}) {
+		t.Fatalf("no caps = %+v", c)
+	}
+	// Export keeps the caps.
+	var ec Config
+	ec.ChannelConfig.MaxPerUser = 3
+	out, err := ExportVoice(ec, f, *f.Rooms, func(string) (string, bool) { return "", false })
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := ParseVoiceFile(out)
+	if err != nil || !back.Caps().Equal(c) {
+		t.Fatalf("round trip:\n%s\n%+v %v", out, back.Caps(), err)
 	}
 }

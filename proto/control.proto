@@ -19,6 +19,7 @@ message ControlMessage {
     ParticipantJoined participant_joined = 13;
     ParticipantLeft participant_left = 14;
     ParticipantUpdated participant_updated = 15;
+    RoomSettings room_settings = 16;
 
     // self state
     SetMute set_mute = 20;
@@ -129,6 +130,17 @@ message RoomState {
   uint32 your_session_id = 2;
   repeated Participant participants = 3;
   map<string, string> metadata = 4;
+  // The most a member should send, in Opus bit/s (the server config's
+  // voice.max_kbps, or the room's own max_kbps). 0 = no cap. Clients
+  // encode at min(their choice, this); older clients ignore it.
+  uint32 max_bitrate = 5;
+}
+
+// S → C: the room's settings changed while you're in it (a config reload).
+// Same meaning as the RoomState fields; older clients ignore it.
+message RoomSettings {
+  string room = 1;
+  uint32 max_bitrate = 2; // 0 = no cap
 }
 
 message ParticipantJoined { Participant participant = 1; }

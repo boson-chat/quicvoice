@@ -144,6 +144,11 @@ type RoomServiceImpl interface {
 	// SetStrict and SetMaxParticipants apply a config file reload.
 	SetStrict(strict bool)
 	SetMaxParticipants(n int)
+	// SetBitrateCaps sets the most members should send, in Opus bit/s:
+	// def in every room, or rooms[id] where given (0 = no cap). Joins get
+	// the room's cap in RoomState; members of a room whose cap changed get
+	// a RoomSettings.
+	SetBitrateCaps(def int, rooms map[string]int)
 	Leave(ctx context.Context, m *Member, reason string)
 	SetMute(ctx context.Context, m *Member, muted, deafened bool)
 	// RelayAudioClock sends m's lip-sync report to the others in its room.
@@ -171,6 +176,9 @@ type RoomService struct {
 
 	mu    sync.Mutex
 	rooms map[string]*Room
+	// caps: voice bitrate caps (SetBitrateCaps), under mu.
+	capDefault int
+	capRooms   map[string]int
 }
 
 type Option func(*RoomService)
@@ -248,6 +256,39 @@ func (s *RoomService) SetStrict(strict bool) { s.strict.Store(strict) }
 // SetMaxParticipants changes the per-room limit for new joins. Rooms already
 // over it keep their members.
 func (s *RoomService) SetMaxParticipants(n int) { s.maxParticipants.Store(int64(n)) }
+
+func (s *RoomService) SetBitrateCaps(def int, rooms map[string]int) {
+	s.mu.Lock()
+	old := make(map[string]int, len(s.rooms))
+	for name := range s.rooms {
+		old[name] = s.capLocked(name)
+	}
+	s.capDefault, s.capRooms = def, maps.Clone(rooms)
+	type change struct {
+		r   *Room
+		cap int
+	}
+	var changed []change
+	for name, r := range s.rooms {
+		if c := s.capLocked(name); c != old[name] {
+			changed = append(changed, change{r, c})
+		}
+	}
+	s.mu.Unlock()
+	for _, c := range changed {
+		c.r.broadcast(0, &controlpb.ControlMessage{Msg: &controlpb.ControlMessage_RoomSettings{
+			RoomSettings: &controlpb.RoomSettings{Room: c.r.name, MaxBitrate: uint32(c.cap)},
+		}})
+	}
+}
+
+// capLocked is room's bitrate cap. Caller holds s.mu.
+func (s *RoomService) capLocked(room string) int {
+	if c, ok := s.capRooms[room]; ok {
+		return c
+	}
+	return s.capDefault
+}
 
 func (s *RoomService) List(_ context.Context, id *auth.Identity) []Info {
 	// Copy the room index under the lock; members are then read from each
@@ -438,6 +479,7 @@ func (s *RoomService) Join(ctx context.Context, name string, id *auth.Identity, 
 	if err != nil {
 		return fail(err)
 	}
+	maxBitrate := s.capLocked(name)
 	m := &Member{SessionID: sid, Identity: id, peer: p, room: r}
 	others := make([]*controlpb.Participant, 0, len(r.members))
 	for _, o := range r.members {
@@ -456,6 +498,7 @@ func (s *RoomService) Join(ctx context.Context, name string, id *auth.Identity, 
 		Room:          name,
 		YourSessionId: uint32(sid),
 		Participants:  append(others, m.participant()),
+		MaxBitrate:    uint32(maxBitrate),
 	}
 	return m, state, nil
 }
