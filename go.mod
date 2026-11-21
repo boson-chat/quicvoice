@@ -3,6 +3,7 @@ module github.com/boson-chat/quicvoice
 go 1.27.1
 
 require (
+	github.com/MicahParks/jwkset v0.11.4
 	github.com/MicahParks/keyfunc/v3 v3.9.2
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/gen2brain/malgo v0.11.27
@@ -31,7 +32,6 @@ require (
 
 require (
 	github.com/BurntSushi/toml v1.2.0 // indirect
-	github.com/MicahParks/jwkset v0.11.4 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
