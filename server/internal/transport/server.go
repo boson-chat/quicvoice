@@ -7,6 +7,11 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/boson-chat/quicvoice/server/config"
@@ -17,6 +22,8 @@ import (
 	"github.com/boson-chat/quicvoice/server/metrics"
 	"github.com/boson-chat/quicvoice/wire"
 	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
+	"github.com/quic-go/webtransport-go"
 )
 
 // Application error codes used when closing a connection.
@@ -28,6 +35,10 @@ const (
 	CodeShutdown quic.ApplicationErrorCode = 4
 )
 
+// WebTransportPath is where browsers open their session
+// (https://host:port/wt, on the QUIC port).
+const WebTransportPath = "/wt"
+
 type Server struct {
 	cfg     config.Config
 	tls     *tls.Config
@@ -35,6 +46,13 @@ type Server struct {
 	rooms   room.RoomServiceImpl
 	metrics *metrics.Metrics
 	tickets videoticket.VideoTicketServiceImpl // nil = no video
+
+	ready chan struct{}
+	addr  atomic.Pointer[net.Addr]
+	wt    *webtransport.Server
+	// h3 QUIC connections by remote address, so a WebTransport session can
+	// report its connection's RTT and loss.
+	h3conns sync.Map // string → *quic.Conn
 }
 
 // SetVideoTickets turns on video tickets for voice-channel members.
@@ -42,9 +60,17 @@ func (s *Server) SetVideoTickets(t videoticket.VideoTicketServiceImpl) { s.ticke
 
 func NewServer(cfg config.Config, tlsConf *tls.Config, a auth.AuthServiceImpl, r room.RoomServiceImpl, m *metrics.Metrics) *Server {
 	tlsConf = tlsConf.Clone()
-	tlsConf.NextProtos = []string{wire.ALPN}
+	// One port, two protocols: native quicvoice, and HTTP/3 for browsers'
+	// WebTransport sessions.
+	tlsConf.NextProtos = []string{wire.ALPN, http3.NextProtoH3}
 	tlsConf.MinVersion = tls.VersionTLS13
-	return &Server{cfg: cfg, tls: tlsConf, auth: a, rooms: r, metrics: m}
+	return &Server{cfg: cfg, tls: tlsConf, auth: a, rooms: r, metrics: m, ready: make(chan struct{})}
+}
+
+// Addr is the bound UDP address once Serve is listening (tests use :0).
+func (s *Server) Addr() net.Addr {
+	<-s.ready
+	return *s.addr.Load()
 }
 
 // Serve listens until ctx is cancelled.
@@ -53,18 +79,51 @@ func (s *Server) Serve(ctx context.Context) error {
 		EnableDatagrams: true,
 		MaxIdleTimeout:  s.cfg.QUICConfig.MaxIdleTimeout,
 		KeepAlivePeriod: s.cfg.QUICConfig.KeepAlive,
-		// One control stream per connection; leave a little headroom.
-		MaxIncomingStreams:    4,
-		MaxIncomingUniStreams: -1,
+		// One control stream per connection (WebTransport: plus the
+		// CONNECT request stream); leave a little headroom.
+		MaxIncomingStreams: 8,
+		// Native clients open none; HTTP/3 needs the peer's control and
+		// QPACK streams (WebTransport sessions use no others here).
+		MaxIncomingUniStreams: 8,
+		// Required by WebTransport (reliable stream resets).
+		EnableStreamResetPartialDelivery: true,
 	})
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", s.cfg.QUICConfig.Addr, err)
 	}
+	a := ln.Addr()
+	s.addr.Store(&a)
+	close(s.ready)
 	log := logger.FromCtx(ctx)
-	log.Info().Str("addr", s.cfg.QUICConfig.Addr).Msg("QUIC listening")
+	log.Info().Str("addr", a.String()).Str("webtransport", WebTransportPath).Msg("QUIC listening")
+
+	mux := http.NewServeMux()
+	mux.HandleFunc(WebTransportPath, func(w http.ResponseWriter, r *http.Request) {
+		if !s.checkOrigin(r) {
+			// Upgrade would refuse it too, but without a status: an
+			// unwritten response is a 200, which a client takes as success.
+			log.Debug().Str("origin", r.Header.Get("Origin")).Msg("webtransport origin not allowed")
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		sess, err := s.wt.Upgrade(w, r)
+		if err != nil {
+			log.Debug().Err(err).Msg("webtransport upgrade failed")
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		var qc *quic.Conn
+		if v, ok := s.h3conns.Load(r.RemoteAddr); ok {
+			qc = v.(*quic.Conn)
+		}
+		go s.handle(ctx, wtConn{s: sess, q: qc})
+	})
+	s.wt = &webtransport.Server{H3: &http3.Server{Handler: mux}, CheckOrigin: s.checkOrigin}
+	webtransport.ConfigureHTTP3Server(s.wt.H3)
 
 	go func() {
 		<-ctx.Done()
+		_ = s.wt.Close()
 		_ = ln.Close()
 	}()
 
@@ -76,19 +135,57 @@ func (s *Server) Serve(ctx context.Context) error {
 			}
 			return err
 		}
-		go s.handle(ctx, conn)
+		if conn.ConnectionState().TLS.NegotiatedProtocol == http3.NextProtoH3 {
+			key := conn.RemoteAddr().String()
+			s.h3conns.Store(key, conn)
+			go func() {
+				defer s.h3conns.Delete(key)
+				_ = s.wt.ServeQUICConn(conn)
+			}()
+			continue
+		}
+		go s.handle(ctx, quicConn{conn})
 	}
 }
 
-func (s *Server) handle(ctx context.Context, conn *quic.Conn) {
+// checkOrigin applies WEBTRANSPORT_ORIGINS (empty or "*" = any). Sessions
+// still need a token in Hello; origins only narrow which pages may try.
+func (s *Server) checkOrigin(r *http.Request) bool {
+	return OriginAllowed(s.cfg.QUICConfig.WebTransportOrigins, r.Header.Get("Origin"))
+}
+
+// OriginAllowed reports whether origin is in the comma-separated list
+// (empty or "*" = any origin).
+func OriginAllowed(list, origin string) bool {
+	list = strings.TrimSpace(list)
+	if list == "" || list == "*" {
+		return true
+	}
+	for _, o := range strings.Split(list, ",") {
+		if o = strings.TrimSpace(o); o == "*" || (o != "" && strings.EqualFold(strings.TrimSuffix(o, "/"), origin)) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) handle(ctx context.Context, conn vconn) {
 	s.metrics.ConnectionOpened(ctx)
 	defer s.metrics.ConnectionClosed(context.WithoutCancel(ctx))
 
-	l := logger.FromCtx(ctx).With().Str("remote", conn.RemoteAddr().String()).Logger()
-	ctx = logger.WithLogger(conn.Context(), l)
+	l := logger.FromCtx(ctx).With().Str("remote", conn.RemoteAddr().String()).Str("transport", conn.Kind()).Logger()
+	sctx, cancel := context.WithCancel(logger.WithLogger(conn.Context(), l))
+	defer cancel()
+	go func() {
+		select {
+		case <-ctx.Done():
+			conn.CloseWithError(CodeShutdown, "server shutting down")
+		case <-sctx.Done():
+		}
+	}()
 
 	sess := newSession(s, conn)
-	err := sess.run(ctx)
+	err := sess.run(sctx)
 	if err != nil && !isClosed(err) {
 		l.Debug().Err(err).Msg("session ended")
 	}
@@ -97,7 +194,8 @@ func (s *Server) handle(ctx context.Context, conn *quic.Conn) {
 func isClosed(err error) bool {
 	var appErr *quic.ApplicationError
 	var idle *quic.IdleTimeoutError
-	return errors.As(err, &appErr) || errors.As(err, &idle) || errors.Is(err, context.Canceled)
+	var sessErr *webtransport.SessionError
+	return errors.As(err, &appErr) || errors.As(err, &idle) || errors.As(err, &sessErr) || errors.Is(err, context.Canceled)
 }
 
 // helloDeadline bounds how long a connection may sit before authenticating.

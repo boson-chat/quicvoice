@@ -15,6 +15,7 @@ import (
 	"github.com/boson-chat/quicvoice/server/metrics"
 	"github.com/boson-chat/quicvoice/wire"
 	"github.com/quic-go/quic-go"
+	"github.com/quic-go/webtransport-go"
 )
 
 // Control messages queued for a client before we treat it as stuck.
@@ -30,7 +31,7 @@ const downlinkQueue = 128
 
 type session struct {
 	srv   *Server
-	conn  *quic.Conn
+	conn  vconn
 	out   chan *controlpb.ControlMessage
 	dgram chan []byte
 
@@ -40,7 +41,7 @@ type session struct {
 	lastClock time.Time // last relayed AudioClock (control goroutine only)
 }
 
-func newSession(srv *Server, conn *quic.Conn) *session {
+func newSession(srv *Server, conn vconn) *session {
 	return &session{
 		srv:   srv,
 		conn:  conn,
@@ -94,7 +95,7 @@ func (s *session) SendControl(m *controlpb.ControlMessage) error {
 	case s.out <- m:
 		return nil
 	default:
-		_ = s.conn.CloseWithError(CodeSlow, "control queue full")
+		s.conn.CloseWithError(CodeSlow, "control queue full")
 		return errors.New("control queue full")
 	}
 }
@@ -106,11 +107,11 @@ func (s *session) run(ctx context.Context) (err error) {
 	defer s.leave(ctx, metrics.LeaveDisconnected)
 
 	actx, cancel := context.WithDeadline(ctx, s.srv.helloDeadline())
-	stream, err := s.conn.AcceptStream(actx)
+	stream, err := s.conn.AcceptControl(actx)
 	cancel()
 	if err != nil {
 		mt.Handshake(ctx, metrics.HandshakeNoStream, 0)
-		_ = s.conn.CloseWithError(CodeProtocol, "no control stream")
+		s.conn.CloseWithError(CodeProtocol, "no control stream")
 		return err
 	}
 
@@ -119,7 +120,7 @@ func (s *session) run(ctx context.Context) (err error) {
 	first, err := rd.Read()
 	if err != nil {
 		mt.Handshake(ctx, metrics.HandshakeNoHello, 0)
-		_ = s.conn.CloseWithError(CodeProtocol, "no hello")
+		s.conn.CloseWithError(CodeProtocol, "no hello")
 		return err
 	}
 	_ = stream.SetReadDeadline(time.Time{})
@@ -142,11 +143,11 @@ func (s *session) run(ctx context.Context) (err error) {
 	s.identity = id
 	l := log.With().Str("user", id.UserID).Logger()
 	ctx = logger.WithLogger(ctx, l)
-	l.Info().Str("client", hello.GetClientVersion()).Msg("authenticated")
+	l.Info().Str("client", hello.GetClientVersion()).Str("transport", s.conn.Kind()).Msg("authenticated")
 
 	go s.writeLoop(stream)
 	go s.datagramWriter()
-	_ = s.SendControl(welcome(s.srv.cfg.RoomConfig.MaxPayload))
+	_ = s.SendControl(welcome(s.maxPayload()))
 	mt.Handshake(ctx, metrics.HandshakeOK, time.Since(accepted))
 
 	tok := mt.SessionStarted(ctx, hello.GetClientVersion())
@@ -271,7 +272,7 @@ func (s *session) leave(ctx context.Context, reason metrics.LeaveReason) {
 func (s *session) datagramLoop(ctx context.Context) {
 	mt := s.srv.metrics
 	maxPerSec := s.srv.cfg.RoomConfig.MaxDatagramsPerSec
-	maxLen := s.srv.cfg.RoomConfig.MaxPayload + wire.UplinkHeaderLen
+	maxLen := s.maxPayload() + wire.UplinkHeaderLen
 	var window time.Time
 	count := 0
 	// Uplink loss estimate. Only this goroutine touches these.
@@ -395,7 +396,10 @@ func (s *session) statsLoop(ctx context.Context) {
 }
 
 func (s *session) sampleStats(ctx context.Context, prev quic.ConnectionStats) quic.ConnectionStats {
-	cur := s.conn.ConnectionStats()
+	cur, ok := s.conn.Stats()
+	if !ok {
+		return prev
+	}
 	s.srv.metrics.QUICSample(ctx, metrics.QUICSample{
 		SmoothedRTT:     cur.SmoothedRTT,
 		RTTVariation:    cur.MeanDeviation,
@@ -416,12 +420,12 @@ func delta(cur, prev uint64) uint64 {
 	return cur - prev
 }
 
-func (s *session) writeLoop(stream *quic.Stream) {
+func (s *session) writeLoop(stream ctrlStream) {
 	for {
 		select {
 		case m := <-s.out:
 			if err := wire.WriteControl(stream, m); err != nil {
-				_ = s.conn.CloseWithError(CodeProtocol, "control write failed")
+				s.conn.CloseWithError(CodeProtocol, "control write failed")
 				return
 			}
 		case <-s.conn.Context().Done():
@@ -438,7 +442,7 @@ func (s *session) sendError(code controlpb.Error_Code, msg string, fatal bool) {
 
 // fatal writes an Error directly (the write loop may not be running yet) and
 // closes the connection.
-func (s *session) fatal(stream *quic.Stream, code controlpb.Error_Code, msg string) error {
+func (s *session) fatal(stream ctrlStream, code controlpb.Error_Code, msg string) error {
 	_ = stream.SetWriteDeadline(time.Now().Add(2 * time.Second))
 	_ = wire.WriteControl(stream, &controlpb.ControlMessage{Msg: &controlpb.ControlMessage_Error{
 		Error: &controlpb.Error{Code: code, Message: msg, Fatal: true},
@@ -446,7 +450,7 @@ func (s *session) fatal(stream *quic.Stream, code controlpb.Error_Code, msg stri
 	_ = stream.Close()
 	// Give the peer a moment to read the Error before the close frame lands.
 	time.Sleep(100 * time.Millisecond)
-	_ = s.conn.CloseWithError(CodeAuth, msg)
+	s.conn.CloseWithError(CodeAuth, msg)
 	return errors.New(msg)
 }
 
@@ -456,7 +460,24 @@ func disconnectReason(err error) metrics.DisconnectReason {
 	var idle *quic.IdleTimeoutError
 	var trErr *quic.TransportError
 	var strErr *quic.StreamError
+	var sessErr *webtransport.SessionError
+	var wtStrErr *webtransport.StreamError
 	switch {
+	case errors.As(err, &sessErr):
+		if sessErr.Remote {
+			return metrics.DisconnectClientClosed
+		}
+		switch quic.ApplicationErrorCode(sessErr.ErrorCode) {
+		case CodeSlow:
+			return metrics.DisconnectSlowConsumer
+		case CodeProtocol:
+			return metrics.DisconnectProtocolError
+		case CodeShutdown:
+			return metrics.DisconnectServerShutdown
+		}
+		return metrics.DisconnectError
+	case errors.As(err, &wtStrErr) && wtStrErr.Remote:
+		return metrics.DisconnectClientClosed
 	case errors.As(err, &appErr):
 		if appErr.Remote {
 			return metrics.DisconnectClientClosed
@@ -506,6 +527,12 @@ func joinErrorCode(err error) controlpb.Error_Code {
 	default:
 		return controlpb.Error_PROTOCOL
 	}
+}
+
+// maxPayload is the largest Opus payload this session may send: the
+// configured cap, lower on WebTransport.
+func (s *session) maxPayload() int {
+	return s.conn.MaxPayload(s.srv.cfg.RoomConfig.MaxPayload)
 }
 
 func welcome(maxPayload int) *controlpb.ControlMessage {

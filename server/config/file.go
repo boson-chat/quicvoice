@@ -48,6 +48,10 @@ type VoiceFile struct {
 	PublicHTTPAddr     *string // PUBLIC_HTTP_ADDR
 	MaxDatagramsPerSec *int    // MAX_DATAGRAMS_PER_SEC
 	MaxDatagramPayload *int    // MAX_DATAGRAM_PAYLOAD
+	// Web pages (origins) that may use voice: WebTransport sessions and
+	// the public API's CORS. Sets WEBTRANSPORT_ORIGINS and
+	// CORS_ALLOWED_ORIGINS; an empty list = any page.
+	WebOrigins *[]string // WEBTRANSPORT_ORIGINS, CORS_ALLOWED_ORIGINS
 }
 
 // Voice section keys.
@@ -65,6 +69,7 @@ const (
 	KeyPublicHTTPAddr     = "voice.public_http_addr"
 	KeyMaxDatagramsPerSec = "voice.max_datagrams_per_sec"
 	KeyMaxDatagramPayload = "voice.max_datagram_payload"
+	KeyWebOrigins         = "voice.web_origins"
 )
 
 var (
@@ -148,6 +153,8 @@ func ParseVoiceFile(data []byte) (VoiceFile, error) {
 			f.MaxDatagramsPerSec, err = positive(k.Value, v, 100_000)
 		case "max_datagram_payload":
 			f.MaxDatagramPayload, err = positive(k.Value, v, 65_000)
+		case "web_origins":
+			f.WebOrigins, err = origins(v)
 		}
 		if err != nil {
 			return VoiceFile{}, err
@@ -155,6 +162,24 @@ func ParseVoiceFile(data []byte) (VoiceFile, error) {
 	}
 	return f, nil
 }
+
+// origins: a list of page origins like https://chat.example.com (or "*").
+func origins(v *yaml.Node) (*[]string, error) {
+	if v.Kind != yaml.SequenceNode {
+		return nil, configfile.Errorf(v.Line, v.Column, "voice.web_origins: want a list like [https://chat.example.com]")
+	}
+	out := []string{}
+	for _, it := range v.Content {
+		o := strings.TrimSuffix(strings.TrimSpace(it.Value), "/")
+		if it.Kind != yaml.ScalarNode || (o != "*" && !originPattern.MatchString(o)) {
+			return nil, configfile.Errorf(it.Line, it.Column, "voice.web_origins: %q is not an origin like https://chat.example.com", it.Value)
+		}
+		out = append(out, o)
+	}
+	return &out, nil
+}
+
+var originPattern = regexp.MustCompile(`^https?://[A-Za-z0-9.\-\[\]:]+$`)
 
 func isNull(n *yaml.Node) bool {
 	return n.Kind == yaml.ScalarNode && n.Tag == "!!null"
@@ -360,6 +385,13 @@ func (f VoiceFile) Effective(base Config) Config {
 	set(&c.HTTPConfig.PublicAddr, f.PublicHTTPAddr)
 	set(&c.RoomConfig.MaxDatagramsPerSec, f.MaxDatagramsPerSec)
 	set(&c.RoomConfig.MaxPayload, f.MaxDatagramPayload)
+	if f.WebOrigins != nil {
+		c.QUICConfig.WebTransportOrigins = strings.Join(*f.WebOrigins, ",")
+		c.HTTPConfig.CORSAllowedOrigins = c.QUICConfig.WebTransportOrigins
+		if c.HTTPConfig.CORSAllowedOrigins == "" {
+			c.HTTPConfig.CORSAllowedOrigins = "*"
+		}
+	}
 	return c
 }
 
@@ -383,6 +415,8 @@ func RestartRequired(running, c Config) []string {
 	add(running.HTTPConfig.PublicAddr != c.HTTPConfig.PublicAddr, KeyPublicHTTPAddr)
 	add(running.RoomConfig.MaxDatagramsPerSec != c.RoomConfig.MaxDatagramsPerSec, KeyMaxDatagramsPerSec)
 	add(running.RoomConfig.MaxPayload != c.RoomConfig.MaxPayload, KeyMaxDatagramPayload)
+	add(running.QUICConfig.WebTransportOrigins != c.QUICConfig.WebTransportOrigins ||
+		running.CORSOrigins() != c.CORSOrigins(), KeyWebOrigins)
 	return keys
 }
 
@@ -433,6 +467,7 @@ func ExportVoice(cfg Config, f VoiceFile, rooms []RoomEntry, lookupEnv func(stri
 		{"public_http_addr", has("PUBLIC_HTTP_ADDR", f.PublicHTTPAddr != nil), cfg.HTTPConfig.PublicAddr},
 		{"max_datagrams_per_sec", has("MAX_DATAGRAMS_PER_SEC", f.MaxDatagramsPerSec != nil), cfg.RoomConfig.MaxDatagramsPerSec},
 		{"max_datagram_payload", has("MAX_DATAGRAM_PAYLOAD", f.MaxDatagramPayload != nil), cfg.RoomConfig.MaxPayload},
+		{"web_origins", has("WEBTRANSPORT_ORIGINS", f.WebOrigins != nil), splitOrigins(cfg.QUICConfig.WebTransportOrigins)},
 	} {
 		if !e.on {
 			continue
@@ -475,4 +510,15 @@ func ReadVoiceFile(path string) (VoiceFile, error) {
 		return VoiceFile{}, fmt.Errorf("%s: %w", path, err)
 	}
 	return f, nil
+}
+
+// splitOrigins turns a comma-separated origin list into a slice.
+func splitOrigins(list string) []string {
+	out := []string{}
+	for _, o := range strings.Split(list, ",") {
+		if o = strings.TrimSpace(o); o != "" {
+			out = append(out, o)
+		}
+	}
+	return out
 }

@@ -101,9 +101,12 @@ func SelfSigned(host string) (tls.Certificate, error) {
 		Subject:      pkix.Name{CommonName: host},
 		DNSNames:     []string{host},
 		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(30 * 24 * time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		// 13 days: browsers only accept a self-signed WebTransport
+		// certificate via serverCertificateHashes if it's ECDSA and valid
+		// for at most 14 days.
+		NotAfter:    time.Now().Add(13 * 24 * time.Hour),
+		KeyUsage:    x509.KeyUsageDigitalSignature,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {

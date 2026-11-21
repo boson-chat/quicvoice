@@ -79,11 +79,45 @@ func StartServerWithContext(ctx context.Context, addr, version string, metricsHa
 	})
 }
 
-// StartPublicServerWithContext serves the public router until ctx is cancelled.
-func StartPublicServerWithContext(ctx context.Context, addr string, a auth.AuthServiceImpl, r room.RoomServiceImpl, vc voicechannel.VoiceChannelServiceImpl, tickets ...videoticket.VideoTicketServiceImpl) error {
+// PublicOptions configure the public listener beyond its routes.
+type PublicOptions struct {
+	// CORSOrigins: pages that may call the API (comma-separated, "*" = any).
+	CORSOrigins string
+	// DevCertHash is the hex SHA-256 of a self-signed dev certificate,
+	// served at GET /v1/info so a browser can trust it through
+	// WebTransport's serverCertificateHashes. Empty with a real cert.
+	DevCertHash string
+	// QUICPort is the UDP port of QUIC and WebTransport (/wt).
+	QUICPort int
+}
+
+// WithInfo adds GET /v1/info (where browsers open WebTransport, and a dev
+// certificate's hash) in front of the public router.
+func WithInfo(o PublicOptions, next nethttp.Handler) nethttp.Handler {
+	mux := nethttp.NewServeMux()
+	mux.HandleFunc("GET /v1/info", func(w nethttp.ResponseWriter, _ *nethttp.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		info := map[string]any{"quic_port": o.QUICPort, "webtransport_path": "/wt"}
+		if o.DevCertHash != "" {
+			info["dev_cert_hash"] = o.DevCertHash
+		}
+		_ = json.NewEncoder(w).Encode(info)
+	})
+	mux.Handle("/", next)
+	return mux
+}
+
+// NewPublicHandler is the public router with /v1/info and CORS.
+func NewPublicHandler(o PublicOptions, a auth.AuthServiceImpl, r room.RoomServiceImpl, vc voicechannel.VoiceChannelServiceImpl, tickets ...videoticket.VideoTicketServiceImpl) nethttp.Handler {
+	return CORS(o.CORSOrigins, WithInfo(o, NewPublicRouter(a, r, vc, tickets...)))
+}
+
+// StartPublicServerWithContext serves the public handler until ctx is cancelled.
+func StartPublicServerWithContext(ctx context.Context, addr string, o PublicOptions, a auth.AuthServiceImpl, r room.RoomServiceImpl, vc voicechannel.VoiceChannelServiceImpl, tickets ...videoticket.VideoTicketServiceImpl) error {
 	return serve(ctx, "public HTTP", &nethttp.Server{
 		Addr:              addr,
-		Handler:           NewPublicRouter(a, r, vc, tickets...),
+		Handler:           NewPublicHandler(o, a, r, vc, tickets...),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,

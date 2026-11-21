@@ -171,3 +171,40 @@ func TestBitrateCaps(t *testing.T) {
 		t.Fatalf("round trip:\n%s\n%+v %v", out, back.Caps(), err)
 	}
 }
+
+func TestWebOrigins(t *testing.T) {
+	f, err := ParseVoiceFile([]byte("voice:\n  web_origins: [https://chat.example.com/, \"http://localhost:5173\"]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var base Config
+	c := f.Effective(base)
+	if c.QUICConfig.WebTransportOrigins != "https://chat.example.com,http://localhost:5173" || c.CORSOrigins() != c.QUICConfig.WebTransportOrigins {
+		t.Fatalf("origins %q / %q", c.QUICConfig.WebTransportOrigins, c.CORSOrigins())
+	}
+	if got := RestartRequired(base, c); !slices.Equal(got, []string{KeyWebOrigins}) {
+		t.Fatalf("restart_required = %v", got)
+	}
+	// An empty list = any page.
+	f, err = ParseVoiceFile([]byte("voice:\n  web_origins: []\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := f.Effective(base); c.QUICConfig.WebTransportOrigins != "" || c.CORSOrigins() != "*" {
+		t.Fatalf("empty list: %q / %q", c.QUICConfig.WebTransportOrigins, c.CORSOrigins())
+	}
+	for _, bad := range []string{"web_origins: https://x.test", "web_origins: [chat.example.com]", "web_origins: [\"https://x.test/path\"]"} {
+		if _, err := ParseVoiceFile([]byte("voice:\n  " + bad + "\n")); err == nil {
+			t.Errorf("%s accepted", bad)
+		}
+	}
+	// Env: CORS falls back to WEBTRANSPORT_ORIGINS.
+	base.QUICConfig.WebTransportOrigins = "https://a.test"
+	if base.CORSOrigins() != "https://a.test" {
+		t.Fatal(base.CORSOrigins())
+	}
+	base.HTTPConfig.CORSAllowedOrigins = "*"
+	if base.CORSOrigins() != "*" {
+		t.Fatal(base.CORSOrigins())
+	}
+}

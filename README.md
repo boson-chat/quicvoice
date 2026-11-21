@@ -74,6 +74,11 @@ reference in [docs/ROOMS.md](docs/ROOMS.md#api).
 | `PATCH /v1/rooms/{id}` | Rename / reorder / re-lock `{name?, position?, min_role?, speak_role?, require_channel_membership?, allowed_roles?}` → `200` |
 | `DELETE /v1/rooms/{id}` | Delete; everyone in it gets `Error{KICKED}` → `204` |
 | `GET /.well-known/video-jwks.json` | Public key for video tickets (only with `VIDEO_QUIC_URL`; no auth). See [docs/VIDEO.md](docs/VIDEO.md) |
+| `GET /v1/info` | `{quic_port, webtransport_path: "/wt", dev_cert_hash?}` (no auth). `dev_cert_hash` (hex SHA-256) only with the self-signed dev certificate, for browsers' `serverCertificateHashes` |
+
+Browsers may call the API from the pages in `CORS_ALLOWED_ORIGINS`
+(preflights answered for `GET/POST/PATCH/DELETE` with `Authorization` and
+`Content-Type`; never with credentials: the API takes bearer tokens only).
 
 Missing, malformed, invalid or expired token → `401`,
 `WWW-Authenticate: Bearer realm="quicvoice"`, body `{"error":"...","code":"unauthorized"}`.
@@ -85,6 +90,8 @@ Missing, malformed, invalid or expired token → `401`,
 | `QUIC_ADDR` | `:7700` | UDP voice listener |
 | `HTTP_ADDR` | `:8080` | `/healthz`, `/version`, `/metrics`, `/internal/config/status`. Cluster-internal only |
 | `PUBLIC_HTTP_ADDR` | `:8090` | Public API: `GET /v1/rooms`, `GET /healthz`. Empty = off |
+| `WEBTRANSPORT_ORIGINS` | — (any) | Pages allowed to open WebTransport sessions (`https://host:7700/wt`), comma-separated, e.g. `https://chat.boson.chat`. Empty or `*` = any page (the token still authorizes). Refused origins get `403` |
+| `CORS_ALLOWED_ORIGINS` | `WEBTRANSPORT_ORIGINS` | Pages allowed to call the public API (CORS), comma-separated; `*` = any. Empty = same as `WEBTRANSPORT_ORIGINS`, so any page when both are empty |
 | `VOICE_ROOMS` | `general:General` | Configured rooms, comma-separated `id:Display Name`, in display order. Ids: `[a-z0-9-]{1,32}`. `voice.rooms` in the config file wins |
 | `VOICE_ROOMS_STRICT` | `true` | Only registry rooms can be joined (`ROOM_NOT_FOUND` otherwise). `false` = other names create ad-hoc rooms |
 | `VOICE_ROOMS_DB` | — | Room registry file (e.g. `/data/rooms.json`). Empty = in memory: API-created rooms are lost on restart |
@@ -141,6 +148,8 @@ voice:
   public_http_addr: ":8090"    # PUBLIC_HTTP_ADDR ("" = off)
   max_datagrams_per_sec: 60    # MAX_DATAGRAMS_PER_SEC
   max_datagram_payload: 1000   # MAX_DATAGRAM_PAYLOAD
+  web_origins:                 # WEBTRANSPORT_ORIGINS + CORS_ALLOWED_ORIGINS
+    - https://chat.example.com  # ([] = any page)
 ```
 
 The file is watched (fsnotify on its directory, since the admin panel
