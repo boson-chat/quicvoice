@@ -63,6 +63,10 @@ type serverSetup struct {
 	auth auth.AuthServiceImpl
 	// tickets: video tickets on (VIDEO_QUIC_URL set, JWKS served).
 	tickets *videoticket.VideoTicketService
+	// wtOrigins: WEBTRANSPORT_ORIGINS ("" = any page).
+	wtOrigins string
+	// maxPayload: MAX_DATAGRAM_PAYLOAD (0 = the default).
+	maxPayload int
 }
 
 func startServerWith(t *testing.T, setup serverSetup) testServer {
@@ -74,6 +78,10 @@ func startServerWith(t *testing.T, setup serverSetup) testServer {
 	}
 	cfg.QUICConfig.Addr = freeUDPAddr(t)
 	cfg.TelemetryConfig.QUICStatsInterval = 50 * time.Millisecond
+	cfg.QUICConfig.WebTransportOrigins = setup.wtOrigins
+	if setup.maxPayload > 0 {
+		cfg.RoomConfig.MaxPayload = setup.maxPayload
+	}
 	if setup.tickets != nil {
 		cfg.VideoConfig.QUICURL = "quic://video.test:7710"
 		cfg.VideoConfig.WebTransportURL = "https://video.test:7710/wt"

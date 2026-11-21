@@ -59,6 +59,10 @@ type QUICConfig struct {
 	KeepAlive      time.Duration `default:"10s" env:"QUIC_KEEPALIVE"`
 	// How long a new connection has to send Hello.
 	HelloTimeout time.Duration `default:"5s" env:"HELLO_TIMEOUT"`
+	// Pages allowed to open WebTransport sessions (https://host:port/wt on
+	// the QUIC port): comma-separated origins like https://chat.boson.chat.
+	// Empty or "*" = any page; the token in Hello is what authorizes.
+	WebTransportOrigins string `env:"WEBTRANSPORT_ORIGINS"`
 }
 
 // VideoConfig turns on video in voice channels (docs: quicvideo
@@ -84,6 +88,19 @@ type HTTPConfig struct {
 	// Public API (GET /v1/rooms, /healthz), meant to sit behind a TLS
 	// reverse proxy. Never serves /metrics. Empty = off.
 	PublicAddr string `default:":8090" env:"PUBLIC_HTTP_ADDR"`
+	// Origins whose pages may call the public API (CORS): comma-separated,
+	// "*" = any. Empty = WEBTRANSPORT_ORIGINS (and so any, when that is
+	// empty too). Requests carry a bearer token, never cookies, so CORS
+	// never allows credentials.
+	CORSAllowedOrigins string `env:"CORS_ALLOWED_ORIGINS"`
+}
+
+// CORSOrigins is the effective CORS allow-list of the public API.
+func (c Config) CORSOrigins() string {
+	if c.HTTPConfig.CORSAllowedOrigins != "" {
+		return c.HTTPConfig.CORSAllowedOrigins
+	}
+	return c.QUICConfig.WebTransportOrigins
 }
 
 type AuthConfig struct {

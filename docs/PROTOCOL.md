@@ -16,6 +16,40 @@
 The client opens **one bidirectional stream** right after the handshake. This
 is the control stream. Audio goes only in datagrams.
 
+## WebTransport (browsers)
+
+Browsers can't open raw QUIC connections, so the server also speaks
+HTTP/3 with WebTransport on **the same UDP port** (ALPN `h3` next to
+`quicvoice/1`; the TLS handshake picks one):
+
+- URL: `https://<host>:<quic port>/wt` (e.g. `https://voice.boson.chat:7700/wt`).
+- The page's `Origin` must be in `WEBTRANSPORT_ORIGINS` (empty = any);
+  otherwise the CONNECT gets `403`. The token in `Hello` is what authorizes.
+- The session carries the same protocol as a native connection: the client
+  opens **one bidirectional stream** (the control stream, same framing and
+  messages) and audio/ping datagrams are WebTransport datagrams with the
+  byte layouts below, unchanged.
+- **Datagram size:** an HTTP/3 datagram adds a quarter-stream-id varint to
+  the QUIC datagram frame and browsers size datagrams for a ~1200-byte path.
+  `Welcome.max_datagram_payload` on a WebTransport session is
+  `min(MAX_DATAGRAM_PAYLOAD, 1000)`; larger uplinks are dropped. 1000 bytes
+  of Opus covers 20 ms frames up to ~400 kbit/s.
+- Session close codes are the connection close codes below, as
+  WebTransport session error codes.
+- **Writing datagrams:** Chromium and Firefox have `datagrams.writable`;
+  WebKit has only the newer `datagrams.createWritable()`. The web client
+  (`web/src/client.ts`) uses whichever exists.
+- **Local development:** without `TLS_CERT_FILE` the server makes a
+  self-signed ECDSA certificate valid for 13 days, which browsers accept
+  through `serverCertificateHashes` (they require ECDSA and ≤ 14 days).
+  Its SHA-256 is served at `GET /v1/info` (`dev_cert_hash`) on the public
+  listener; never with a real certificate.
+
+Browser support (2026-11, tested in `web/`): Chromium and Firefox; WebKit on
+macOS (Safari's engine) with `createWritable()`; WebKitGTK (Linux) has no
+WebTransport. Opus encode/decode uses WebCodecs `AudioEncoder` /
+`AudioDecoder` (all three on macOS).
+
 ## Control stream framing
 
 ```
