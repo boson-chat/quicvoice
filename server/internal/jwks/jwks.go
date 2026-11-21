@@ -178,8 +178,13 @@ func (c *Cache) Keyfunc(t *jwt.Token) (any, error) {
 		return key, nil
 	}
 	kid, _ := t.Header[jwkset.HeaderKID].(string)
-	if kid == "" || c.has(kid) {
-		return nil, err // e.g. alg mismatch: refetching won't help
+	if kid == "" {
+		return nil, err
+	}
+	if c.has(kid) {
+		// Arrived since the first try (another token's fetch), or present
+		// and rejected (e.g. alg mismatch), which a refetch won't change.
+		return c.kf.Keyfunc(t)
 	}
 	if !c.refetchFor(kid) && !(!c.Ready() && c.await(kid)) {
 		return nil, err
@@ -200,8 +205,13 @@ func (c *Cache) refetchFor(kid string) bool {
 		return false
 	}
 	for _, s := range c.sources {
+		wasLoaded := s.loaded.Load()
 		fetched, err := c.fetchUnless(s, kid)
-		if fetched {
+		// The fetch that first loads a source is free: otherwise a token
+		// racing the background load would block a key rotation for the
+		// next UnknownKIDEvery. Failed fetches count, so an issuer that's
+		// down isn't hit once per token.
+		if fetched && (wasLoaded || err != nil) {
 			c.lastUnknown = time.Now()
 		}
 		if err != nil {
