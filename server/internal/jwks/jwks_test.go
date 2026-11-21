@@ -233,8 +233,9 @@ func TestConcurrentNewKID(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if verify(c, tok) != nil {
+			if err := verify(c, tok); err != nil {
 				failed.Add(1)
+				t.Log(err)
 			}
 		}()
 	}
@@ -324,5 +325,30 @@ func TestBadURL(t *testing.T) {
 	}
 	if _, err := New(context.Background(), []string{"not a url"}, Options{}); err == nil {
 		t.Fatal("bad URL accepted")
+	}
+}
+
+// A token racing the first load (its fetch is the one that loads the keys)
+// doesn't use up the unknown-kid budget: a rotation right after still works.
+func TestFirstLoadIsFree(t *testing.T) {
+	for range 20 {
+		ctx, cancel := context.WithCancel(context.Background())
+		srv := &jwksServer{}
+		k1, k2 := newKey(t, "k1"), newKey(t, "k2")
+		srv.set(k1)
+		ts := httptest.NewServer(srv)
+		c, err := New(ctx, []string{ts.URL}, Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := verify(c, k1.sign(t)); err != nil {
+			t.Fatalf("first token: %v", err)
+		}
+		srv.set(k1, k2)
+		if err := verify(c, k2.sign(t)); err != nil {
+			t.Fatalf("rotation right after the first load: %v", err)
+		}
+		cancel()
+		ts.Close()
 	}
 }
