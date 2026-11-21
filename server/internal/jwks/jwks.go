@@ -261,7 +261,7 @@ func (c *Cache) run(s *source) {
 	delay := c.opts.MinBackoff
 	warned := false
 	for !s.loaded.Load() {
-		err := c.fetch(s)
+		err := c.load(s)
 		if err == nil || s.loaded.Load() {
 			break
 		}
@@ -294,6 +294,17 @@ func (c *Cache) run(s *source) {
 			}
 		}
 	}
+}
+
+// load fetches s unless it has loaded meanwhile (e.g. by a token's
+// unknown-kid fetch).
+func (c *Cache) load(s *source) error {
+	s.fetchMu.Lock()
+	defer s.fetchMu.Unlock()
+	if s.loaded.Load() {
+		return nil
+	}
+	return c.doFetch(s)
 }
 
 // fetch refetches s (see doFetch).
