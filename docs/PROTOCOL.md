@@ -23,7 +23,8 @@ HTTP/3 with WebTransport on **the same UDP port** (ALPN `h3` next to
 `quicvoice/1`; the TLS handshake picks one):
 
 - URL: `https://<host>:<quic port>/wt` (e.g. `https://voice.boson.chat:7700/wt`).
-- The page's `Origin` must be in `WEBTRANSPORT_ORIGINS` (empty = any);
+- The page's `Origin` must be in `WEBTRANSPORT_ORIGINS` (empty = any;
+  `directory` = the auth service's web origins list, see the README);
   otherwise the CONNECT gets `403`. The token in `Hello` is what authorizes.
 - The session carries the same protocol as a native connection: the client
   opens **one bidirectional stream** (the control stream, same framing and

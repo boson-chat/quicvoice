@@ -17,6 +17,7 @@ import (
 	qvhttp "github.com/boson-chat/quicvoice/server/http"
 	"github.com/boson-chat/quicvoice/server/internal/certs"
 	"github.com/boson-chat/quicvoice/server/internal/db/repositories/voiceroom"
+	"github.com/boson-chat/quicvoice/server/internal/origins"
 	"github.com/boson-chat/quicvoice/server/internal/services/auth"
 	"github.com/boson-chat/quicvoice/server/internal/services/room"
 	"github.com/boson-chat/quicvoice/server/internal/services/videoticket"
@@ -65,6 +66,8 @@ type serverSetup struct {
 	tickets *videoticket.VideoTicketService
 	// wtOrigins: WEBTRANSPORT_ORIGINS ("" = any page).
 	wtOrigins string
+	// origins: the parsed list (SetOrigins), e.g. following a fetcher.
+	origins *origins.Policy
 	// maxPayload: MAX_DATAGRAM_PAYLOAD (0 = the default).
 	maxPayload int
 }
@@ -135,6 +138,9 @@ func startServerWith(t *testing.T, setup serverSetup) testServer {
 	srv := transport.NewServer(cfg, &tls.Config{Certificates: []tls.Certificate{cert}}, authService, rooms, m)
 	if tickets != nil {
 		srv.SetVideoTickets(tickets)
+	}
+	if setup.origins != nil {
+		srv.SetOrigins(setup.origins)
 	}
 	go func() { _ = srv.Serve(ctx) }()
 	time.Sleep(100 * time.Millisecond)

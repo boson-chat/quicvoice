@@ -198,6 +198,14 @@ func TestWebOrigins(t *testing.T) {
 			t.Errorf("%s accepted", bad)
 		}
 	}
+	// directory (the auth service's web origins), mixable with origins.
+	f, err = ParseVoiceFile([]byte("voice:\n  web_origins: [Directory, https://chat.example.com]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := f.Effective(base); c.QUICConfig.WebTransportOrigins != "directory,https://chat.example.com" || c.CORSOrigins() != c.QUICConfig.WebTransportOrigins {
+		t.Fatalf("directory: %q / %q", c.QUICConfig.WebTransportOrigins, c.CORSOrigins())
+	}
 	// Env: CORS falls back to WEBTRANSPORT_ORIGINS.
 	base.QUICConfig.WebTransportOrigins = "https://a.test"
 	if base.CORSOrigins() != "https://a.test" {

@@ -1,12 +1,15 @@
 package http_test
 
 import (
+	"context"
 	"encoding/json"
 	nethttp "net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	qvhttp "github.com/boson-chat/quicvoice/server/http"
+	"github.com/boson-chat/quicvoice/server/internal/origins"
 )
 
 func corsReq(t *testing.T, h nethttp.Handler, method, path, origin string, preflight bool) *httptest.ResponseRecorder {
@@ -101,5 +104,35 @@ func TestInfoEndpoint(t *testing.T) {
 	// Everything else still reaches the API.
 	if rec := corsReq(t, h, nethttp.MethodGet, "/v1/rooms", "", false); rec.Code != nethttp.StatusNotFound {
 		t.Fatalf("passthrough %d", rec.Code)
+	}
+}
+
+func TestCORSDirectory(t *testing.T) {
+	auth := httptest.NewServer(nethttp.HandlerFunc(func(w nethttp.ResponseWriter, _ *nethttp.Request) {
+		_, _ = w.Write([]byte(`{"origins":["https://chat.home.test","https://chat.other.test"]}`))
+	}))
+	defer auth.Close()
+	f := origins.NewFetcher(auth.URL, time.Hour, nil)
+	p, err := origins.Parse("directory,https://chat.own.test", f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := qvhttp.NewPublicHandler(qvhttp.PublicOptions{CORSOrigins: "*", Origins: p}, nil, nil, nil)
+	allowed := func(origin string) string {
+		return corsReq(t, h, nethttp.MethodOptions, "/v1/rooms", origin, true).Header().Get("Access-Control-Allow-Origin")
+	}
+	// Before the first fetch: the fixed origin only (Origins wins over CORSOrigins).
+	if allowed("https://chat.own.test") != "https://chat.own.test" || allowed("https://chat.other.test") != "" {
+		t.Fatal("before the fetch")
+	}
+	if _, err := f.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if allowed("https://chat.other.test") != "https://chat.other.test" || allowed("https://evil.test") != "" {
+		t.Fatal("after the fetch")
+	}
+	// The request's own spelling comes back.
+	if got := allowed("https://Chat.Other.test"); got != "https://Chat.Other.test" {
+		t.Fatalf("case: %q", got)
 	}
 }

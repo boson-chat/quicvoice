@@ -5,12 +5,14 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/boson-chat/quicvoice/client"
 	"github.com/boson-chat/quicvoice/gen/controlpb"
+	"github.com/boson-chat/quicvoice/server/internal/origins"
 	"github.com/boson-chat/quicvoice/server/internal/transport"
 	"github.com/boson-chat/quicvoice/wire"
 	"github.com/quic-go/quic-go"
@@ -216,6 +218,34 @@ func TestWebTransportOrigins(t *testing.T) {
 	dialWT(t, ts.addr, "web2", "https://other.test")
 }
 
+// WEBTRANSPORT_ORIGINS=directory: the auth service's list, fetched.
+func TestWebTransportDirectoryOrigins(t *testing.T) {
+	authSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"origins":["https://chat.other.test"]}`))
+	}))
+	defer authSrv.Close()
+	f := origins.NewFetcher(authSrv.URL, time.Hour, nil)
+	p, err := origins.Parse("directory,https://chat.own.test", f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := startServerWith(t, serverSetup{wtOrigins: "directory,https://chat.own.test", origins: p})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	// Not fetched yet: the own origin only.
+	if _, _, err := wtDial(ctx, ts.addr, "https://chat.other.test"); err == nil {
+		t.Fatal("accepted before the list was fetched")
+	}
+	dialWT(t, ts.addr, "own", "https://chat.own.test")
+	if _, err := f.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	dialWT(t, ts.addr, "other", "https://chat.other.test")
+	if _, _, err := wtDial(ctx, ts.addr, "https://evil.test"); err == nil {
+		t.Fatal("a session from an unlisted origin was accepted")
+	}
+}
+
 func TestOriginAllowed(t *testing.T) {
 	for _, c := range []struct {
 		list, origin string
@@ -229,6 +259,8 @@ func TestOriginAllowed(t *testing.T) {
 		{"https://a.test", "https://b.test", false},
 		{"https://a.test", "", false},
 		{"https://a.test", "http://a.test", false},
+		{"https://a.test", "https://a.test:443", true},
+		{"directory", "https://a.test", false},
 	} {
 		if got := transport.OriginAllowed(c.list, c.origin); got != c.want {
 			t.Errorf("OriginAllowed(%q, %q) = %v, want %v", c.list, c.origin, got, c.want)

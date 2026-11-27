@@ -9,13 +9,13 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/boson-chat/quicvoice/server/config"
 	"github.com/boson-chat/quicvoice/server/internal/logger"
+	"github.com/boson-chat/quicvoice/server/internal/origins"
 	"github.com/boson-chat/quicvoice/server/internal/services/auth"
 	"github.com/boson-chat/quicvoice/server/internal/services/room"
 	"github.com/boson-chat/quicvoice/server/internal/services/videoticket"
@@ -46,6 +46,7 @@ type Server struct {
 	rooms   room.RoomServiceImpl
 	metrics *metrics.Metrics
 	tickets videoticket.VideoTicketServiceImpl // nil = no video
+	origins *origins.Policy                    // nil = cfg's WEBTRANSPORT_ORIGINS, fixed entries
 
 	ready chan struct{}
 	addr  atomic.Pointer[net.Addr]
@@ -148,25 +149,24 @@ func (s *Server) Serve(ctx context.Context) error {
 	}
 }
 
+// SetOrigins sets the parsed WEBTRANSPORT_ORIGINS (which can follow the
+// directory's web origins). Unset: the list in the config, fixed entries
+// only. Call before Serve.
+func (s *Server) SetOrigins(p *origins.Policy) { s.origins = p }
+
 // checkOrigin applies WEBTRANSPORT_ORIGINS (empty or "*" = any). Sessions
 // still need a token in Hello; origins only narrow which pages may try.
 func (s *Server) checkOrigin(r *http.Request) bool {
+	if s.origins != nil {
+		return s.origins.Allowed(r.Header.Get("Origin"))
+	}
 	return OriginAllowed(s.cfg.QUICConfig.WebTransportOrigins, r.Header.Get("Origin"))
 }
 
 // OriginAllowed reports whether origin is in the comma-separated list
-// (empty or "*" = any origin).
+// (empty or "*" = any origin; "directory" adds nothing without a fetcher).
 func OriginAllowed(list, origin string) bool {
-	list = strings.TrimSpace(list)
-	if list == "" || list == "*" {
-		return true
-	}
-	for _, o := range strings.Split(list, ",") {
-		if o = strings.TrimSpace(o); o == "*" || (o != "" && strings.EqualFold(strings.TrimSuffix(o, "/"), origin)) {
-			return true
-		}
-	}
-	return false
+	return origins.MustParse(list, nil).Allowed(origin)
 }
 
 func (s *Server) handle(ctx context.Context, conn vconn) {

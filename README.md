@@ -90,8 +90,10 @@ Missing, malformed, invalid or expired token → `401`,
 | `QUIC_ADDR` | `:7700` | UDP voice listener |
 | `HTTP_ADDR` | `:8080` | `/healthz`, `/version`, `/metrics`, `/internal/config/status`. Cluster-internal only |
 | `PUBLIC_HTTP_ADDR` | `:8090` | Public API: `GET /v1/rooms`, `GET /healthz`. Empty = off |
-| `WEBTRANSPORT_ORIGINS` | — (any) | Pages allowed to open WebTransport sessions (`https://host:7700/wt`), comma-separated, e.g. `https://chat.boson.chat`. Empty or `*` = any page (the token still authorizes). Refused origins get `403` |
-| `CORS_ALLOWED_ORIGINS` | `WEBTRANSPORT_ORIGINS` | Pages allowed to call the public API (CORS), comma-separated; `*` = any. Empty = same as `WEBTRANSPORT_ORIGINS`, so any page when both are empty |
+| `WEBTRANSPORT_ORIGINS` | — (any) | Pages allowed to open WebTransport sessions (`https://host:7700/wt`), comma-separated, e.g. `https://chat.boson.chat`. Empty or `*` = any page (the token still authorizes). `directory` = the list at `ORIGINS_URL` (see [web origins](#web-origins-directory)); mixable, e.g. `directory,https://chat.example.com`. Origins compare normalised (case, default port, trailing slash). Refused origins get `403` |
+| `ORIGINS_URL` | — | With `directory`: the auth service's `GET /v1/web-origins` (`{"origins": [...]}`), e.g. `http://auth:8080/v1/web-origins`. Required when a list says `directory` |
+| `ORIGINS_REFRESH` | `5m` | How often `ORIGINS_URL` is fetched (every 30 s, or this if shorter, after a failure) |
+| `CORS_ALLOWED_ORIGINS` | `WEBTRANSPORT_ORIGINS` | Pages allowed to call the public API (CORS), comma-separated; `*` = any; `directory` as above. Empty = same as `WEBTRANSPORT_ORIGINS`, so any page when both are empty |
 | `VOICE_ROOMS` | `general:General` | Configured rooms, comma-separated `id:Display Name`, in display order. Ids: `[a-z0-9-]{1,32}`. `voice.rooms` in the config file wins |
 | `VOICE_ROOMS_STRICT` | `true` | Only registry rooms can be joined (`ROOM_NOT_FOUND` otherwise). `false` = other names create ad-hoc rooms |
 | `VOICE_ROOMS_DB` | — | Room registry file (e.g. `/data/rooms.json`). Empty = in memory: API-created rooms are lost on restart |
@@ -149,8 +151,22 @@ voice:
   max_datagrams_per_sec: 60    # MAX_DATAGRAMS_PER_SEC
   max_datagram_payload: 1000   # MAX_DATAGRAM_PAYLOAD
   web_origins:                 # WEBTRANSPORT_ORIGINS + CORS_ALLOWED_ORIGINS
-    - https://chat.example.com  # ([] = any page)
+    - https://chat.example.com  # ([] = any page; "directory" = ORIGINS_URL's list)
 ```
+
+### Web origins (directory)
+
+`WEBTRANSPORT_ORIGINS=directory` (the Boson stack's default) accepts the
+pages of the Boson web clients the install's auth service lists at
+`GET /v1/web-origins`: its own web client plus those of the Boson servers
+verified in the directories it follows (auth rebuilds that every 10 min,
+from each server's boson.json `web.url`). quicvoiced fetches `ORIGINS_URL`
+at start and every `ORIGINS_REFRESH` and applies it to both the
+WebTransport `Origin` check and the public API's CORS (an allowed page gets
+its origin echoed back, never `*`). A failed fetch keeps the last good list;
+until the first one works only the fixed entries next to `directory` are
+allowed, which is why the stack passes `directory,https://WEB_HOST`. So a
+newly verified server's web client gets in within about 15 minutes.
 
 The file is watched (fsnotify on its directory, since the admin panel
 replaces it atomically, plus an mtime poll every 10 s). On a change:
