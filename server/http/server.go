@@ -12,6 +12,7 @@ import (
 	"github.com/boson-chat/quicvoice/server/http/handlers"
 	"github.com/boson-chat/quicvoice/server/internal/configfile"
 	"github.com/boson-chat/quicvoice/server/internal/logger"
+	"github.com/boson-chat/quicvoice/server/internal/origins"
 	"github.com/boson-chat/quicvoice/server/internal/services/auth"
 	"github.com/boson-chat/quicvoice/server/internal/services/room"
 	"github.com/boson-chat/quicvoice/server/internal/services/videoticket"
@@ -82,7 +83,10 @@ func StartServerWithContext(ctx context.Context, addr, version string, metricsHa
 // PublicOptions configure the public listener beyond its routes.
 type PublicOptions struct {
 	// CORSOrigins: pages that may call the API (comma-separated, "*" = any).
+	// Origins, when set, wins: the parsed list (it can follow the
+	// directory's web origins, WEBTRANSPORT_ORIGINS=directory).
 	CORSOrigins string
+	Origins     *origins.Policy
 	// DevCertHash is the hex SHA-256 of a self-signed dev certificate,
 	// served at GET /v1/info so a browser can trust it through
 	// WebTransport's serverCertificateHashes. Empty with a real cert.
@@ -110,7 +114,11 @@ func WithInfo(o PublicOptions, next nethttp.Handler) nethttp.Handler {
 
 // NewPublicHandler is the public router with /v1/info and CORS.
 func NewPublicHandler(o PublicOptions, a auth.AuthServiceImpl, r room.RoomServiceImpl, vc voicechannel.VoiceChannelServiceImpl, tickets ...videoticket.VideoTicketServiceImpl) nethttp.Handler {
-	return CORS(o.CORSOrigins, WithInfo(o, NewPublicRouter(a, r, vc, tickets...)))
+	h := WithInfo(o, NewPublicRouter(a, r, vc, tickets...))
+	if o.Origins != nil {
+		return CORSPolicy(o.Origins, h)
+	}
+	return CORS(o.CORSOrigins, h)
 }
 
 // StartPublicServerWithContext serves the public handler until ctx is cancelled.

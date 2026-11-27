@@ -10,6 +10,7 @@ import (
 	"net"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/boson-chat/quicvoice/server/internal/configfile"
 	"github.com/boson-chat/quicvoice/server/internal/db/repositories/voiceroom"
 	"github.com/boson-chat/quicvoice/server/internal/logger"
+	"github.com/boson-chat/quicvoice/server/internal/origins"
 	"github.com/boson-chat/quicvoice/server/internal/services/auth"
 	"github.com/boson-chat/quicvoice/server/internal/services/ergo"
 	"github.com/boson-chat/quicvoice/server/internal/services/liveconfig"
@@ -135,7 +137,12 @@ var serveCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		webOrigins, wtOrigins, corsOrigins, err := buildOrigins(ctx, cfg)
+		if err != nil {
+			return err
+		}
 		quicServer := transport.NewServer(cfg, tlsConf, authService, roomService, m)
+		quicServer.SetOrigins(wtOrigins)
 		if tickets != nil {
 			quicServer.SetVideoTickets(tickets)
 		}
@@ -146,6 +153,9 @@ var serveCmd = &cobra.Command{
 		if link != nil {
 			g.Go(func() error { link.Run(gctx); return nil })
 		}
+		if webOrigins != nil {
+			g.Go(func() error { webOrigins.Run(gctx); return nil })
+		}
 		g.Go(func() error {
 			return http.StartServerWithContext(gctx, cfg.HTTPConfig.Addr, cfg.AppConfig.Version, provider.Handler(), watcher)
 		})
@@ -155,7 +165,7 @@ var serveCmd = &cobra.Command{
 				jwks = tickets
 			}
 			g.Go(func() error {
-				opts := http.PublicOptions{CORSOrigins: cfg.CORSOrigins(), QUICPort: quicPort(cfg.QUICConfig.Addr)}
+				opts := http.PublicOptions{CORSOrigins: cfg.CORSOrigins(), Origins: corsOrigins, QUICPort: quicPort(cfg.QUICConfig.Addr)}
 				if cfg.QUICConfig.CertFile == "" {
 					opts.DevCertHash = devCertHash(tlsConf)
 				}
@@ -164,6 +174,31 @@ var serveCmd = &cobra.Command{
 		}
 		return g.Wait()
 	},
+}
+
+// buildOrigins parses WEBTRANSPORT_ORIGINS and the public API's CORS list.
+// When either says "directory" they share one fetcher of ORIGINS_URL
+// (returned, to be run), which is then required.
+func buildOrigins(ctx context.Context, cfg config.Config) (*origins.Fetcher, *origins.Policy, *origins.Policy, error) {
+	q := cfg.QUICConfig
+	var f *origins.Fetcher
+	if origins.UsesDirectory(q.WebTransportOrigins) || origins.UsesDirectory(cfg.CORSOrigins()) {
+		if strings.TrimSpace(q.OriginsURL) == "" {
+			return nil, nil, nil, errors.New("WEBTRANSPORT_ORIGINS / CORS_ALLOWED_ORIGINS say directory: set ORIGINS_URL (the auth service's /v1/web-origins, e.g. http://auth:8080/v1/web-origins)")
+		}
+		f = origins.NewFetcher(strings.TrimSpace(q.OriginsURL), q.OriginsRefresh, nil)
+		logger.FromCtx(ctx).Info().Str("url", q.OriginsURL).Dur("refresh", q.OriginsRefresh).
+			Msg("web origins: following the directory's Boson web clients")
+	}
+	parse := func(name, list string) *origins.Policy {
+		p, err := origins.Parse(list, f)
+		if err != nil {
+			logger.FromCtx(ctx).Warn().Err(err).Str("list", list).Msgf("%s: entry ignored", name)
+			p = origins.MustParse(list, f)
+		}
+		return p
+	}
+	return f, parse("WEBTRANSPORT_ORIGINS", q.WebTransportOrigins), parse("CORS_ALLOWED_ORIGINS", cfg.CORSOrigins()), nil
 }
 
 // shutdownMetrics flushes pending OTLP exports. ctx is already cancelled on

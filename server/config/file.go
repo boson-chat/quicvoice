@@ -50,7 +50,8 @@ type VoiceFile struct {
 	MaxDatagramPayload *int    // MAX_DATAGRAM_PAYLOAD
 	// Web pages (origins) that may use voice: WebTransport sessions and
 	// the public API's CORS. Sets WEBTRANSPORT_ORIGINS and
-	// CORS_ALLOWED_ORIGINS; an empty list = any page.
+	// CORS_ALLOWED_ORIGINS; an empty list = any page; "directory" = the
+	// list at ORIGINS_URL.
 	WebOrigins *[]string // WEBTRANSPORT_ORIGINS, CORS_ALLOWED_ORIGINS
 }
 
@@ -163,7 +164,8 @@ func ParseVoiceFile(data []byte) (VoiceFile, error) {
 	return f, nil
 }
 
-// origins: a list of page origins like https://chat.example.com (or "*").
+// origins: a list of page origins like https://chat.example.com, "*" or
+// "directory" (the web origins at ORIGINS_URL).
 func origins(v *yaml.Node) (*[]string, error) {
 	if v.Kind != yaml.SequenceNode {
 		return nil, configfile.Errorf(v.Line, v.Column, "voice.web_origins: want a list like [https://chat.example.com]")
@@ -171,8 +173,11 @@ func origins(v *yaml.Node) (*[]string, error) {
 	out := []string{}
 	for _, it := range v.Content {
 		o := strings.TrimSuffix(strings.TrimSpace(it.Value), "/")
-		if it.Kind != yaml.ScalarNode || (o != "*" && !originPattern.MatchString(o)) {
-			return nil, configfile.Errorf(it.Line, it.Column, "voice.web_origins: %q is not an origin like https://chat.example.com", it.Value)
+		if strings.EqualFold(o, "directory") {
+			o = "directory"
+		}
+		if it.Kind != yaml.ScalarNode || (o != "*" && o != "directory" && !originPattern.MatchString(o)) {
+			return nil, configfile.Errorf(it.Line, it.Column, "voice.web_origins: %q is not an origin like https://chat.example.com, * or directory", it.Value)
 		}
 		out = append(out, o)
 	}

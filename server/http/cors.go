@@ -2,7 +2,8 @@ package http
 
 import (
 	nethttp "net/http"
-	"strings"
+
+	"github.com/boson-chat/quicvoice/server/internal/origins"
 )
 
 // CORS lets pages on the allowed origins (comma-separated; "*" = any) call
@@ -11,24 +12,17 @@ import (
 // the API doesn't use them. Preflights are answered here and never reach
 // the handlers.
 func CORS(allowed string, next nethttp.Handler) nethttp.Handler {
-	any := false
-	set := map[string]bool{}
-	for _, o := range strings.Split(allowed, ",") {
-		o = strings.TrimSuffix(strings.TrimSpace(o), "/")
-		switch o {
-		case "":
-		case "*":
-			any = true
-		default:
-			set[strings.ToLower(o)] = true
-		}
-	}
-	if strings.TrimSpace(allowed) == "" {
-		any = true
-	}
+	return CORSPolicy(origins.MustParse(allowed, nil), next)
+}
+
+// CORSPolicy is CORS for a parsed list (which may follow the directory's
+// web origins, see package origins). "*" when it allows any origin, else
+// the request's origin when allowed.
+func CORSPolicy(p *origins.Policy, next nethttp.Handler) nethttp.Handler {
+	any := p.Any()
 	return nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
 		origin := r.Header.Get("Origin")
-		ok := origin != "" && (any || set[strings.ToLower(origin)])
+		ok := origin != "" && p.Allowed(origin)
 		h := w.Header()
 		if origin != "" {
 			h.Add("Vary", "Origin")

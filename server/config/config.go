@@ -62,7 +62,15 @@ type QUICConfig struct {
 	// Pages allowed to open WebTransport sessions (https://host:port/wt on
 	// the QUIC port): comma-separated origins like https://chat.boson.chat.
 	// Empty or "*" = any page; the token in Hello is what authorizes.
+	// "directory" = the origins at ORIGINS_URL (mixable with fixed
+	// origins, which stay allowed when that list can't be fetched).
 	WebTransportOrigins string `env:"WEBTRANSPORT_ORIGINS"`
+	// The web origins list for "directory": the auth service's
+	// GET /v1/web-origins ({"origins": [...]}), e.g.
+	// http://auth:8080/v1/web-origins. Fetched at start and every
+	// OriginsRefresh; the last good list stays when it fails.
+	OriginsURL     string        `env:"ORIGINS_URL"`
+	OriginsRefresh time.Duration `default:"5m" env:"ORIGINS_REFRESH"`
 }
 
 // VideoConfig turns on video in voice channels (docs: quicvideo
@@ -89,7 +97,7 @@ type HTTPConfig struct {
 	// reverse proxy. Never serves /metrics. Empty = off.
 	PublicAddr string `default:":8090" env:"PUBLIC_HTTP_ADDR"`
 	// Origins whose pages may call the public API (CORS): comma-separated,
-	// "*" = any. Empty = WEBTRANSPORT_ORIGINS (and so any, when that is
+	// "*" = any, "directory" as in WEBTRANSPORT_ORIGINS. Empty = WEBTRANSPORT_ORIGINS (and so any, when that is
 	// empty too). Requests carry a bearer token, never cookies, so CORS
 	// never allows credentials.
 	CORSAllowedOrigins string `env:"CORS_ALLOWED_ORIGINS"`
