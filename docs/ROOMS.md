@@ -84,14 +84,35 @@ They carry `"guest": true`, `sub` = `guest:<id>`, `name` = the guest's IRC
 nick (unverified), `role` `speaker` and empty `roles`/`perms`. quicvoiced:
 
 - refuses a token whose `guest` claim and `guest:` subject prefix disagree;
-- never treats the nick as an Ergo account (no channel standing: the guest
-  is a plain `member` everywhere, even if an account has the same name);
+- never treats the nick as an Ergo account: the guest is a plain `member`
+  of every channel (never voice, op or founder, even if its nick holds that
+  prefix or an account has the same name);
+- looks up only whether the nick is **in** the room's channel, for
+  `require_channel_membership` (see below);
 - never makes a guest a network admin, lock bypasser or room creator, and
   caps its role at `speaker`, whatever else the token says.
 
-So guests can join (and speak in) open rooms only; `min_role`,
-`require_channel_membership` and `allowed_roles` all keep them out, and
-`speak_role` above `member` makes them listeners. Guests show up with
+So guests can join (and speak in) open rooms and rooms that only need
+people in their channel, when the guest's nick is in it; `min_role` above
+`member` and `allowed_roles` keep them out (`lock_reason` says to sign
+in), and `speak_role` above `member` makes them listeners.
+
+A guest's channel membership is asked by nick, cached `ERGO_CACHE_TTL`:
+
+- Ergo installs: `POST /v1/whois {"nickname": "<nick>"}`; the channel
+  counts only when the client using that nick is **not logged into any
+  account** (a logged-in client with that nick is someone else).
+- Installs bridged to another IRC server (no Ergo): evrd's managed API,
+  `GET /api/managed/channels/{channel}/members/{nick}` (`BRIDGE_API_URL`,
+  `BRIDGE_TOKEN`; evrd with 4evrd/evrd#185). A channel none of evrd's
+  connections is in counts as "not in it".
+- Neither configured: rooms with `require_channel_membership` stay locked
+  for guests (`IRC role check unavailable`).
+
+The nick is unverified (the auth service mints a guest token for any nick
+that isn't an account's name), so someone claiming the nick of a guest in
+the channel gets through a membership lock too. That's why guests are
+capped at `member`: an unverified nick never passes a role lock. Guests show up with
 `"guest": true` in `participants` and in the control protocol's
 `Participant.guest`.
 
@@ -275,6 +296,10 @@ Errors: `{"error": "human text", "code": "<code>"}`.
   under their channel client-side.
 - `can_manage`: the caller may PATCH/DELETE it. `can_join` / `can_speak`:
   the caller's result of the locks above (and the token's `rooms` claim).
+- `lock_reason`: only when `can_join` is false, why, in the words a join is
+  refused with (`"join #boson on IRC first"`, `"needs op or higher in
+  #boson"`, `"IRC role check unavailable, try again shortly"`, ...). Show it
+  instead of working the reason out client-side.
 - `participants`: as before (sorted by `session_id`; `muted` = self- or
   server-muted; `speaking` = voiced frame in the last second; `guest: true`
   for IRC guests, omitted otherwise).
@@ -345,6 +370,8 @@ curl -fsS -X DELETE https://VOICE_HOST/v1/rooms/boson-game-night -H "Authorizati
 | `SETTINGS_TTL` | `30s` | How long a fetched setting is reused |
 | `ERGO_API_URL` | — | Ergo API, e.g. `http://ergo:8089`. Empty = no IRC roles (only admins pass locks and the founders policy) |
 | `ERGO_API_TOKEN` | — | One of Ergo's `api.bearer-tokens`. Empty = lookups off (a warning is logged), even with `ERGO_API_URL` set |
-| `ERGO_CACHE_TTL` | `15s` | Per-account cache of founder/role lookups |
+| `ERGO_CACHE_TTL` | `15s` | Per-account cache of founder/role lookups (and of guests' membership) |
+| `BRIDGE_API_URL` | — | evrd's managed API on a bridged install, e.g. `http://evrd-links:8098`: guests' channel membership by nick. Only used without Ergo |
+| `BRIDGE_TOKEN` | — | evrd's `managed_token`. Empty = bridge lookups off |
 | `VOICE_ROOMS_MAX_PER_USER` | `10` | Dynamic rooms one non-admin may own |
 | `VOICE_ROOMS_MAX` | `500` | Dynamic rooms in total |

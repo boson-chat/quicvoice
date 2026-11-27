@@ -22,6 +22,7 @@ import (
 	"github.com/boson-chat/quicvoice/server/internal/logger"
 	"github.com/boson-chat/quicvoice/server/internal/origins"
 	"github.com/boson-chat/quicvoice/server/internal/services/auth"
+	"github.com/boson-chat/quicvoice/server/internal/services/bridge"
 	"github.com/boson-chat/quicvoice/server/internal/services/ergo"
 	"github.com/boson-chat/quicvoice/server/internal/services/liveconfig"
 	"github.com/boson-chat/quicvoice/server/internal/services/room"
@@ -255,10 +256,27 @@ func buildChannels(ctx context.Context, cfg config.Config, static []room.Def, m 
 		URL: c.AuthInternalURL, Token: c.InternalAPIToken, Fallback: fallback, TTL: c.SettingsTTL,
 	})
 	er := ergo.NewErgoService(ergo.Options{URL: c.ErgoAPIURL, Token: c.ErgoAPIToken, TTL: c.ErgoCacheTTL})
+	// Guests' channel membership: Ergo's API, else (a bridged install) evrd's.
+	var presence voicechannel.Presence = er
+	ttls := ttlFanout{}
+	if s, ok := er.(liveconfig.TTLSetter); ok {
+		ttls = append(ttls, s)
+	}
+	if !er.Enabled() && c.BridgeAPIURL != "" {
+		br := bridge.NewBridgeService(bridge.Options{URL: c.BridgeAPIURL, Token: c.BridgeToken, TTL: c.ErgoCacheTTL})
+		if br.Enabled() {
+			presence = br
+			ttls = append(ttls, br)
+			logger.FromCtx(ctx).Info().Str("url", c.BridgeAPIURL).Msg("guests' IRC channel membership from the bridge (evrd)")
+		} else {
+			logger.FromCtx(ctx).Warn().Msg("BRIDGE_API_URL is set but BRIDGE_TOKEN is empty: guests' channel membership lookups are off")
+		}
+	}
 	vc, err := voicechannel.NewVoiceChannelService(ctx, voicechannel.Options{
 		Repo:       repo,
 		Settings:   st,
 		Ergo:       er,
+		Presence:   presence,
 		Metrics:    m,
 		Static:     static,
 		MaxPerUser: c.MaxPerUser,
@@ -268,8 +286,17 @@ func buildChannels(ctx context.Context, cfg config.Config, static []room.Def, m 
 		return nil, nil, nil, err
 	}
 	sTTL, _ := st.(liveconfig.TTLSetter)
-	eTTL, _ := er.(liveconfig.TTLSetter)
-	return vc, sTTL, eTTL, nil
+	return vc, sTTL, ttls, nil
+}
+
+// ttlFanout sets one TTL on several caches (ERGO_CACHE_TTL: Ergo's and the
+// bridge's).
+type ttlFanout []liveconfig.TTLSetter
+
+func (f ttlFanout) SetTTL(d time.Duration) {
+	for _, s := range f {
+		s.SetTTL(d)
+	}
 }
 
 // devCertHash is the hex SHA-256 of the self-signed dev certificate.

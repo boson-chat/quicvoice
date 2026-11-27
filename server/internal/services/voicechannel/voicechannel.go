@@ -8,6 +8,12 @@
 // service. IRC roles (founder, channel modes) come from Ergo through the
 // ergo service.
 //
+// IRC guests (guest tokens: no account, an unverified nick) are plain
+// members of every channel: never voice, op or founder, whatever their nick
+// holds. Only their channel membership (require_channel_membership) is
+// looked up, by nick, through Options.Presence: Ergo's API, or evrd's
+// managed API on an install bridged to another IRC server.
+//
 // Network permissions come from the voice token. Tokens with the `perms`
 // claim are judged by it alone: voice.manage_any (manage every dynamic
 // room, create under any policy, no per-user limit, set oper locks),
@@ -102,6 +108,9 @@ type View struct {
 	CanManage bool
 	CanJoin   bool
 	CanSpeak  bool
+	// LockReason: why the caller can't join ("" when it can), in the
+	// words AuthorizeJoin refuses with.
+	LockReason string
 }
 
 type Listing struct {
@@ -143,10 +152,19 @@ type VoiceChannelServiceImpl interface {
 	Delete(ctx context.Context, id *auth.Identity, roomID string) (voiceroom.Record, error)
 }
 
+// Presence says whether a nick is in a channel right now: how a guest's
+// channel membership is looked up (ergo.ErgoServiceImpl, or
+// bridge.BridgeServiceImpl on a bridged install).
+type Presence interface {
+	NickIn(ctx context.Context, nick, channel string) (bool, error)
+}
+
 type Options struct {
 	Repo     voiceroom.RoomRepositoryImpl
 	Settings settings.SettingsServiceImpl
 	Ergo     ergo.ErgoServiceImpl
+	// Guests' channel membership. Default: Ergo.
+	Presence Presence
 	Metrics  *metrics.Metrics
 	// Static rooms (VOICE_ROOMS), in display order.
 	Static []room.Def
@@ -161,6 +179,7 @@ type VoiceChannelService struct {
 	repo     voiceroom.RoomRepositoryImpl
 	settings settings.SettingsServiceImpl
 	ergo     ergo.ErgoServiceImpl
+	presence Presence
 	metrics  *metrics.Metrics
 	perUser  int
 	maxRooms int
@@ -198,8 +217,11 @@ func NewVoiceChannelService(ctx context.Context, o Options) (*VoiceChannelServic
 	if o.Settings == nil {
 		o.Settings = settings.NewSettingsService(settings.Options{})
 	}
+	if o.Presence == nil {
+		o.Presence = o.Ergo
+	}
 	s := &VoiceChannelService{
-		repo: o.Repo, settings: o.Settings, ergo: o.Ergo, metrics: o.Metrics,
+		repo: o.Repo, settings: o.Settings, ergo: o.Ergo, presence: o.Presence, metrics: o.Metrics,
 		perUser: o.MaxPerUser, maxRooms: o.MaxRooms, now: o.Now, rooms: map[string]voiceroom.Record{},
 	}
 	recs, err := s.repo.List(ctx)
@@ -354,23 +376,28 @@ func (s *VoiceChannelService) get(id string) (voiceroom.Record, bool) {
 // ---- caller: one request's view of the caller's IRC standing --------------
 
 type caller struct {
-	id   *auth.Identity
-	ergo ergo.ErgoServiceImpl
-	ctx  context.Context
+	id       *auth.Identity
+	ergo     ergo.ErgoServiceImpl
+	presence Presence
+	ctx      context.Context
 
 	fetched bool
 	st      *ergo.Standing
 	err     error
+	// A guest's membership by channel, as asked (see guestIn).
+	guestIn map[string]bool
 }
 
 func (s *VoiceChannelService) caller(ctx context.Context, id *auth.Identity) *caller {
-	return &caller{id: id, ergo: s.ergo, ctx: ctx}
+	return &caller{id: id, ergo: s.ergo, presence: s.presence, ctx: ctx}
 }
 
+// standing is an account's IRC standing. Guests (and tokens without an
+// account) have none: a plain member everywhere, never founder.
 func (c *caller) standing() (*ergo.Standing, error) {
 	if !c.fetched {
 		c.fetched = true
-		if c.id.Account == "" {
+		if c.id.Account == "" || c.id.Guest {
 			c.st = &ergo.Standing{}
 		} else {
 			c.st, c.err = c.ergo.Standing(c.ctx, c.id.Account)
@@ -445,11 +472,37 @@ func (c *caller) role(channel string) (roles.Role, error) {
 }
 
 func (c *caller) inChannel(channel string) (bool, error) {
+	if c.id.Guest {
+		return c.guestInChannel(channel)
+	}
 	st, err := c.standing()
 	if err != nil {
 		return false, err
 	}
 	return st.In(channel), nil
+}
+
+// guestInChannel: the guest's nick (its token's name) is in channel right
+// now, asked once per request and channel. The nick is unverified: this
+// lets whoever claims a nick that's in the channel through a membership
+// lock, nothing more (guests never get a channel role).
+func (c *caller) guestInChannel(channel string) (bool, error) {
+	key := ergo.Casefold(channel)
+	if in, ok := c.guestIn[key]; ok {
+		return in, nil
+	}
+	if c.presence == nil {
+		return false, ErrUnavailable
+	}
+	in, err := c.presence.NickIn(c.ctx, c.id.DisplayName, channel)
+	if err != nil {
+		return false, err
+	}
+	if c.guestIn == nil {
+		c.guestIn = map[string]bool{}
+	}
+	c.guestIn[key] = in
+	return in, nil
 }
 
 // founds: the caller is the founder of channel (registered founder or +q).
@@ -552,12 +605,16 @@ func (s *VoiceChannelService) AuthorizeJoin(ctx context.Context, roomID string, 
 
 func lockText(c *caller, r voiceroom.Record) string {
 	switch {
+	case !c.hasAllowedRole(r) && c.id.Guest:
+		return "needs one of these roles: " + strings.Join(r.AllowedRoles, ", ") + " (sign in: guests have none)"
 	case !c.hasAllowedRole(r):
 		return "needs one of these roles: " + strings.Join(r.AllowedRoles, ", ")
 	case r.MinRole >= roles.Oper:
 		return "network admins only"
 	case r.Parent == "":
 		return "not allowed"
+	case c.id.Guest && r.MinRole > roles.Member:
+		return "needs " + r.MinRole.String() + " or higher in " + r.Parent + " (sign in: guests count as members)"
 	case r.RequireChannelMembership && r.MinRole == roles.Member:
 		return "join " + r.Parent + " on IRC first"
 	case r.RequireChannelMembership:
@@ -573,6 +630,12 @@ func (s *VoiceChannelService) view(c *caller, rec voiceroom.Record) View {
 	}
 	var err error
 	v.CanJoin, v.CanSpeak, err = c.access(rec)
+	switch {
+	case err != nil:
+		v.LockReason = ErrUnavailable.Error()
+	case !v.CanJoin && c.id.CanJoin(rec.ID):
+		v.LockReason = lockText(c, rec)
+	}
 	if err == nil {
 		v.CanManage, err = c.canManage(rec)
 	}

@@ -21,12 +21,13 @@ type Fake struct {
 	mu       sync.Mutex
 	founders map[string]string            // channel (casefolded) → founder account (casefolded)
 	online   map[string]map[string]string // account → channel → mode letter ("" = plain member)
+	anon     map[string]bool              // online nicks not logged into any account (guests)
 	down     bool
 }
 
 // New starts a fake Ergo API that accepts Bearer token.
 func New(t testing.TB, token string) *Fake {
-	f := &Fake{Token: token, founders: map[string]string{}, online: map[string]map[string]string{}}
+	f := &Fake{Token: token, founders: map[string]string{}, online: map[string]map[string]string{}, anon: map[string]bool{}}
 	f.Server = httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(f.Server.Close)
 	return f
@@ -50,6 +51,15 @@ func (f *Fake) Join(account, channel, mode string) {
 		f.online[a] = map[string]string{}
 	}
 	f.online[a][strings.ToLower(channel)] = mode
+}
+
+// JoinGuest puts a client that isn't logged into any account, using nick,
+// in channel with prefix mode.
+func (f *Fake) JoinGuest(nick, channel, mode string) {
+	f.Join(nick, channel, mode)
+	f.mu.Lock()
+	f.anon[strings.ToLower(nick)] = true
+	f.mu.Unlock()
 }
 
 // Part removes account's client from channel.
@@ -108,8 +118,12 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 		for c, m := range chans {
 			list = append(list, map[string]string{"name": c, "mode": m, "join_time": "2026-01-01T00:00:00.000Z"})
 		}
+		account := req.Nickname
+		if f.anon[nick] {
+			account = ""
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "present": true, "nickname": req.Nickname,
-			"account": req.Nickname, "channels": list, "session_count": 1})
+			"account": account, "channels": list, "session_count": 1})
 	default:
 		http.NotFound(w, r)
 	}
