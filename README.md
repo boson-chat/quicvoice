@@ -100,6 +100,7 @@ Missing, malformed, invalid or expired token → `401`,
 | `AUTH_INTERNAL_URL` / `INTERNAL_API_TOKEN` | — | Auth service internal API, for the `voice_channel_creation` setting (cached `SETTINGS_TTL`, 30s) |
 | `VOICE_CHANNEL_CREATION` | `admins` | `admins` \| `founders` \| `registered`, used until the first settings fetch succeeds (and always without `AUTH_INTERNAL_URL`) |
 | `ERGO_API_URL` / `ERGO_API_TOKEN` | — | Ergo HTTP API for founder checks and channel roles (cached `ERGO_CACHE_TTL`, 15s). Empty = no IRC roles |
+| `BRIDGE_API_URL` / `BRIDGE_TOKEN` | — | evrd's managed API on an install bridged to another IRC server (no Ergo), for IRC guests' channel membership by nick (docs/ROOMS.md). Only used without Ergo |
 | `VOICE_ROOMS_MAX_PER_USER` / `VOICE_ROOMS_MAX` | 10 / 500 | Dynamic room limits (per non-admin owner / total) |
 | `TLS_CERT_FILE` / `TLS_KEY_FILE` | — | Reloaded when the file changes. Unset = self-signed |
 | `AUTH_JWKS_URL` | — | Verify tokens from the boson auth service (EdDSA/ES256/RS256) via its JWKS, e.g. `https://auth.example.com/.well-known/jwks.json`. Keys are cached and refetched on an unknown `kid` |

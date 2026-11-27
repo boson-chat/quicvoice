@@ -14,6 +14,10 @@
 //     user's nick is their account name; the response's "account" is checked
 //     anyway. Always-on clients are present while disconnected.
 //
+// Guests (no account, an unverified nick) are looked up by nick with
+// /v1/whois alone (NickIn): only a client that isn't logged into any
+// account counts, and only for channel membership.
+//
 // AMODE entries (ChanServ AMODE) are applied by Ergo when the user joins the
 // channel, so they show up through /v1/whois while the user is in it. Ergo's
 // API has no endpoint that lists a channel's AMODEs, so a user who isn't in
@@ -97,8 +101,12 @@ type ErgoServiceImpl interface {
 	// Standing returns account's IRC channel standing, cached for a short TTL.
 	// An unknown account is an empty Standing, not an error.
 	Standing(ctx context.Context, account string) (*Standing, error)
-	// Enabled is false when no Ergo API is configured; Standing then always
-	// fails with ErrUnavailable.
+	// NickIn reports whether the live client using nick, not logged into
+	// any account, is in channel right now (an IRC guest's membership),
+	// cached for the same TTL. A nick that's offline or logged in is false.
+	NickIn(ctx context.Context, nick, channel string) (bool, error)
+	// Enabled is false when no Ergo API is configured; Standing and NickIn
+	// then always fail with ErrUnavailable.
 	Enabled() bool
 }
 
@@ -124,6 +132,10 @@ type cacheEntry struct {
 	s   *Standing
 	exp time.Time
 }
+
+// guestKey keys a guest nick's channels in the cache, apart from accounts
+// (no account name starts with a space).
+func guestKey(nick string) string { return " guest " + Casefold(nick) }
 
 // NewErgoService returns a client for Ergo's API. An empty URL returns a
 // disabled service.
@@ -165,10 +177,28 @@ func (s *ErgoService) Standing(ctx context.Context, account string) (*Standing, 
 	if !s.Enabled() {
 		return nil, ErrUnavailable
 	}
-	key := Casefold(account)
-	if key == "" {
+	if Casefold(account) == "" {
 		return &Standing{Founded: map[string]bool{}, Joined: map[string]roles.Role{}}, nil
 	}
+	return s.cached(Casefold(account), func() (*Standing, error) { return s.fetch(ctx, account) })
+}
+
+func (s *ErgoService) NickIn(ctx context.Context, nick, channel string) (bool, error) {
+	if !s.Enabled() {
+		return false, ErrUnavailable
+	}
+	if Casefold(nick) == "" || channel == "" {
+		return false, nil
+	}
+	st, err := s.cached(guestKey(nick), func() (*Standing, error) { return s.fetchGuest(ctx, nick) })
+	if err != nil {
+		return false, err
+	}
+	return st.In(channel), nil
+}
+
+// cached returns key's entry while it's fresh, else fetches and stores it.
+func (s *ErgoService) cached(key string, fetch func() (*Standing, error)) (*Standing, error) {
 	now := s.opts.Now()
 	s.mu.Lock()
 	if e, ok := s.cache[key]; ok && now.Before(e.exp) {
@@ -177,7 +207,7 @@ func (s *ErgoService) Standing(ctx context.Context, account string) (*Standing, 
 	}
 	s.mu.Unlock()
 
-	st, err := s.fetch(ctx, account)
+	st, err := fetch()
 	if err != nil {
 		return nil, err
 	}
@@ -224,16 +254,8 @@ func (s *ErgoService) fetch(ctx context.Context, account string) (*Standing, err
 		}
 	}
 
-	var who struct {
-		Success  bool   `json:"success"`
-		Present  bool   `json:"present"`
-		Account  string `json:"account"`
-		Channels []struct {
-			Name string `json:"name"`
-			Mode string `json:"mode"`
-		} `json:"channels"`
-	}
-	if err := s.post(ctx, "/v1/whois", map[string]string{"nickname": account}, &who); err != nil {
+	who, err := s.whois(ctx, account)
+	if err != nil {
 		return nil, err
 	}
 	// Only trust the live client if it is logged into this very account.
@@ -243,6 +265,44 @@ func (s *ErgoService) fetch(ctx context.Context, account string) (*Standing, err
 		}
 	}
 	return st, nil
+}
+
+// fetchGuest: the channels of the client using nick, when it isn't logged
+// into any account (Joined only, every one as a plain member: a guest
+// never holds a channel role here). A logged-in client with that nick is
+// someone else.
+func (s *ErgoService) fetchGuest(ctx context.Context, nick string) (*Standing, error) {
+	ctx, cancel := context.WithTimeout(ctx, s.opts.Timeout)
+	defer cancel()
+	who, err := s.whois(ctx, nick)
+	if err != nil {
+		return nil, err
+	}
+	st := &Standing{Founded: map[string]bool{}, Joined: map[string]roles.Role{}}
+	if who.Success && who.Present && who.Account == "" {
+		for _, c := range who.Channels {
+			st.Joined[Casefold(c.Name)] = roles.Member
+		}
+	}
+	return st, nil
+}
+
+type whoisReply struct {
+	Success  bool   `json:"success"`
+	Present  bool   `json:"present"`
+	Account  string `json:"account"`
+	Channels []struct {
+		Name string `json:"name"`
+		Mode string `json:"mode"`
+	} `json:"channels"`
+}
+
+func (s *ErgoService) whois(ctx context.Context, nick string) (*whoisReply, error) {
+	var who whoisReply
+	if err := s.post(ctx, "/v1/whois", map[string]string{"nickname": nick}, &who); err != nil {
+		return nil, err
+	}
+	return &who, nil
 }
 
 func (s *ErgoService) post(ctx context.Context, path string, body, out any) error {

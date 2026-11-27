@@ -156,6 +156,12 @@ type ChannelConfig struct {
 	ErgoAPIURL   string        `env:"ERGO_API_URL"`
 	ErgoAPIToken string        `env:"ERGO_API_TOKEN"`
 	ErgoCacheTTL time.Duration `default:"15s" env:"ERGO_CACHE_TTL"`
+	// evrd's managed API on an install bridged to another IRC server (no
+	// Ergo): IRC guests' channel membership by nick, cached ERGO_CACHE_TTL.
+	// Only used without ERGO_API_URL/ERGO_API_TOKEN. Empty = guests never
+	// pass require_channel_membership there.
+	BridgeAPIURL string `env:"BRIDGE_API_URL"`
+	BridgeToken  string `env:"BRIDGE_TOKEN"`
 	// Dynamic rooms per (non-admin) owner, and in total.
 	MaxPerUser int `default:"10" env:"VOICE_ROOMS_MAX_PER_USER"`
 	MaxRooms   int `default:"500" env:"VOICE_ROOMS_MAX"`

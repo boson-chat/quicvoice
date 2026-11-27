@@ -17,6 +17,8 @@ import (
 	qvhttp "github.com/boson-chat/quicvoice/server/http"
 	"github.com/boson-chat/quicvoice/server/internal/db/repositories/voiceroom"
 	"github.com/boson-chat/quicvoice/server/internal/services/auth"
+	"github.com/boson-chat/quicvoice/server/internal/services/bridge"
+	"github.com/boson-chat/quicvoice/server/internal/services/bridge/bridgetest"
 	"github.com/boson-chat/quicvoice/server/internal/services/ergo"
 	"github.com/boson-chat/quicvoice/server/internal/services/ergo/ergotest"
 	"github.com/boson-chat/quicvoice/server/internal/services/room"
@@ -127,6 +129,10 @@ type apiOpts struct {
 	policy  string
 	ergo    *ergotest.Fake
 	policy2 *policyServer
+	// noErgo: no Ergo API (an add-on install); bridge: evrd's managed API
+	// for guests' membership instead.
+	noErgo bool
+	bridge *bridgetest.Fake
 }
 
 func newAPI(t *testing.T, o apiOpts) *api {
@@ -147,11 +153,20 @@ func newAPI(t *testing.T, o apiOpts) *api {
 	if err != nil {
 		t.Fatal(err)
 	}
+	ergoOpts := ergo.Options{URL: fe.URL(), Token: "etok", TTL: time.Nanosecond}
+	if o.noErgo {
+		ergoOpts = ergo.Options{}
+	}
+	var presence voicechannel.Presence
+	if o.bridge != nil {
+		presence = bridge.NewBridgeService(bridge.Options{URL: o.bridge.URL(), Token: o.bridge.Token, TTL: time.Nanosecond})
+	}
 	vc, err := voicechannel.NewVoiceChannelService(ctx, voicechannel.Options{
 		Repo: repo,
 		// TTLs of 1ns: every request sees the current fake state.
 		Settings:   settings.NewSettingsService(settings.Options{URL: ps.srv.URL, Token: "itok", TTL: time.Nanosecond}),
-		Ergo:       ergo.NewErgoService(ergo.Options{URL: fe.URL(), Token: "etok", TTL: time.Nanosecond}),
+		Ergo:       ergo.NewErgoService(ergoOpts),
+		Presence:   presence,
 		Static:     o.static,
 		MaxPerUser: 3,
 	})
@@ -208,6 +223,7 @@ type roomOut struct {
 	CanManage                bool       `json:"can_manage"`
 	CanJoin                  bool       `json:"can_join"`
 	CanSpeak                 bool       `json:"can_speak"`
+	LockReason               string     `json:"lock_reason"`
 	Participants             []struct {
 		UserID string `json:"user_id"`
 	} `json:"participants"`

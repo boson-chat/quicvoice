@@ -73,3 +73,51 @@ func TestUnavailable(t *testing.T) {
 		t.Fatalf("down: %v", err)
 	}
 }
+
+// TestNickIn: a guest's membership by nick counts only a client that isn't
+// logged into any account; cached like Standing.
+func TestNickIn(t *testing.T) {
+	f := ergotest.New(t, "tok")
+	f.JoinGuest("Vic", "#Boson", "o")
+	f.Join("alice", "#boson", "") // logged in as alice: not a guest
+	now := time.Unix(1000, 0)
+	s := ergo.NewErgoService(ergo.Options{URL: f.URL(), Token: "tok", TTL: 10 * time.Second, Now: func() time.Time { return now }})
+	ctx := context.Background()
+	for _, c := range []struct {
+		nick, channel string
+		want          bool
+	}{
+		{"vic", "#BOSON", true},
+		{"VIC", "#other", false},
+		{"alice", "#boson", false},
+		{"carol", "#boson", false},
+		{"", "#boson", false},
+		{"vic", "", false},
+	} {
+		if in, err := s.NickIn(ctx, c.nick, c.channel); err != nil || in != c.want {
+			t.Errorf("NickIn(%q, %q) = %v %v, want %v", c.nick, c.channel, in, err, c.want)
+		}
+	}
+	// As an account, vic (whose client isn't logged in) has nothing.
+	if st, _ := s.Standing(ctx, "vic"); st.In("#boson") || st.Role("#boson") != roles.Member {
+		t.Fatalf("account vic: %+v", st)
+	}
+	calls := f.Calls.Load()
+	_, _ = s.NickIn(ctx, "Vic", "#dev")
+	if f.Calls.Load() != calls {
+		t.Fatal("guest lookup not cached")
+	}
+	now = now.Add(11 * time.Second)
+	f.Part("vic", "#boson")
+	if in, _ := s.NickIn(ctx, "vic", "#boson"); in || f.Calls.Load() != calls+1 {
+		t.Fatalf("not refetched after TTL: in=%v calls=%d", in, f.Calls.Load()-calls)
+	}
+
+	if _, err := ergo.NewErgoService(ergo.Options{}).NickIn(ctx, "vic", "#boson"); !errors.Is(err, ergo.ErrUnavailable) {
+		t.Fatalf("disabled: %v", err)
+	}
+	f.SetDown(true)
+	if _, err := ergo.NewErgoService(ergo.Options{URL: f.URL(), Token: "tok"}).NickIn(ctx, "vic", "#boson"); !errors.Is(err, ergo.ErrUnavailable) {
+		t.Fatalf("down: %v", err)
+	}
+}

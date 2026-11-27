@@ -60,10 +60,12 @@ type roomJSON struct {
 	SpeakRole                roles.Role `json:"speak_role"`
 	RequireChannelMembership bool       `json:"require_channel_membership"`
 	// Network roles one of which is needed to join; always an array.
-	AllowedRoles []string          `json:"allowed_roles"`
-	CanManage    bool              `json:"can_manage"`
-	CanJoin      bool              `json:"can_join"`
-	CanSpeak     bool              `json:"can_speak"`
+	AllowedRoles []string `json:"allowed_roles"`
+	CanManage    bool     `json:"can_manage"`
+	CanJoin      bool     `json:"can_join"`
+	CanSpeak     bool     `json:"can_speak"`
+	// Why the caller can't join; omitted when it can.
+	LockReason   string            `json:"lock_reason,omitempty"`
 	Participants []participantJSON `json:"participants"`
 }
 
@@ -102,7 +104,7 @@ func viewJSON(v voicechannel.View, ps []room.ParticipantInfo) roomJSON {
 		ID: r.ID, Name: r.Name, Kind: v.Kind, Position: r.Position,
 		MinRole: r.MinRole, SpeakRole: r.SpeakRole, RequireChannelMembership: r.RequireChannelMembership,
 		AllowedRoles: append([]string{}, r.AllowedRoles...),
-		CanManage:    v.CanManage, CanJoin: v.CanJoin, CanSpeak: v.CanSpeak,
+		CanManage:    v.CanManage, CanJoin: v.CanJoin, CanSpeak: v.CanSpeak, LockReason: v.LockReason,
 		Participants: participantsJSON(ps),
 	}
 	if r.Parent != "" {
